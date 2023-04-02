@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import uuid
 import config
+from queue import Queue
 
 auth_string = f"{config.SHIPSTATION_API_KEY}:{config.SHIPSTATION_API_SECRET}"
 encoded_auth_string = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
@@ -109,38 +110,52 @@ def search_and_print(order_number):
         # List of folders to search
         folders_to_search = [config.folder_1, config.folder_2, config.sent_folder_path]
 
-        #if is_manual_order:
-            #folders_to_search = [sent_folder_path] + folders_to_search
+        found_result = Queue()
 
-        for folder in folders_to_search:
-            print(f"Searching in folder: {folder}")
-
-            folder_contents = get_folder_contents(folder)
-
-            # Search for the file in the Dropbox folder
-            search_results = dbx.files_search(folder, f"*{order_number}.pdf")
-
-            if search_results.matches:
-                print(f"Found {len(search_results.matches)} match(es) for order number {order_number}")
-                for match in search_results.matches:
-                    filename = match.metadata.name
-                    if filename.endswith(f"{order_number}.pdf"):
-                        # Download and save the file
-                        file_path = match.metadata.path_display
-                        local_file_path = os.path.join('/tmp', filename)  # Save the file to the /tmp folder in Lambda
-                        dbx.files_download_to_file(local_file_path, file_path)
-                        print(f"File downloaded and saved to {local_file_path}")
-
-                        # Print the file
-                        printed_files.append(file_path)
-                        print_file(local_file_path, config.PRINTER_SERVICE_API_KEY, order_number)
-
-                        return
-            else:
-                print(f"No file found for order number {order_number}")
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [executor.submit(search_folder, folder, order_number, found_result) for folder in folders_to_search]
+            for future in as_completed(futures):
+                result = future.result()
+                if result and found_result.empty():
+                    found_result.put(result)
+                    local_file_path, file_path = result
+                    printed_files.append(file_path)
+                    print_file(local_file_path, config.PRINTER_SERVICE_API_KEY, order_number)
+                    return
 
     except Exception as e:
         print(f"Error: {e}")
+
+
+
+def search_folder(folder, order_number, found_result):
+    print(f"Searching in folder: {folder}")
+
+    if not found_result.empty():
+        return
+
+    folder_contents = get_folder_contents(folder)
+
+    # Search for the file in the Dropbox folder
+    search_results = dbx.files_search(folder, f"*{order_number}.pdf")
+
+    if search_results.matches:
+        print(f"Found {len(search_results.matches)} match(es) for order number {order_number}")
+        for match in search_results.matches:
+            filename = match.metadata.name
+            if filename.endswith(f"{order_number}.pdf"):
+                # Download and save the file
+                file_path = match.metadata.path_display
+                local_file_path = os.path.join('/tmp', filename)  # Save the file to the /tmp folder in Lambda
+                dbx.files_download_to_file(local_file_path, file_path)
+                print(f"File downloaded and saved to {local_file_path}")
+
+                if found_result.empty():
+                    return local_file_path, file_path
+    else:
+        print(f"No file found for order number {order_number} in {folder}")
+
+
 
 
 def print_file(local_file_path, printer_service_api_key, order_number):
