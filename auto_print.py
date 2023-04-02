@@ -55,10 +55,18 @@ printed_files=[]
 
 def lambda_handler(event, context):
     print("Lambda handler invoked")
+    
+    global session
+    session = requests.Session()
+    session.headers.update({
+        "Content-Type": "application/json",
+        "Authorization": f"Basic {encoded_auth_string}"
+    })
+
     # Extract webhook payload
     payload = json.loads(event["body"])
     # Modify the resource_url so that it ends in includeShipmentItems=True rather than False; this way we can access the order items
-    response = requests.get(payload['resource_url'][:-5] + "True", headers=headers)
+    response = session.get(payload['resource_url'][:-5] + "True")
     data = response.json()
     shipments = data['shipments']
     print(f"Number of shipments: {len(shipments)}")
@@ -165,7 +173,6 @@ def print_file(local_file_path, printer_service_api_key, order_number):
         'Authorization': f'Basic {base64.b64encode(printer_service_api_key.encode()).decode()}'
     }
 
-
     # Read the local file and encode it in base64
     with open(local_file_path, 'rb') as file:
         file_content = file.read()
@@ -184,7 +191,7 @@ def print_file(local_file_path, printer_service_api_key, order_number):
     }
 
     print(f"Sending print job: {print_job}")
-    response = requests.post('https://api.printnode.com/printjobs', headers=headers, json=print_job)
+    response = session.post('https://api.printnode.com/printjobs', headers=headers, json=print_job)
 
     if response.status_code == 201:
         print(f"Print job submitted successfully for order number {order_number}")
