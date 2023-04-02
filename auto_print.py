@@ -1,0 +1,177 @@
+import os
+import json
+import requests
+import base64
+import dropbox
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+import uuid
+import config
+
+auth_string = f"{config.SHIPSTATION_API_KEY}:{config.SHIPSTATION_API_SECRET}"
+encoded_auth_string = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
+
+
+headers = {
+    "Content-Type": "application/json",
+    "Authorization": f"Basic {encoded_auth_string}"
+}
+
+# Function to refresh Dropbox access token
+def refresh_dropbox_token(refresh_token, app_key, app_secret):
+    token_url = "https://api.dropboxapi.com/oauth2/token"
+
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": app_key,
+        "client_secret": app_secret,
+    }
+
+    response = requests.post(token_url, headers=headers, data=data)
+
+    if response.status_code == 200:
+        return response.json()["access_token"]
+    else:
+        raise Exception(f"Error refreshing token: {response.text}")
+
+# Refresh the Dropbox access token
+DROPBOX_ACCESS_TOKEN = refresh_dropbox_token(config.REFRESH_TOKEN, config.DROPBOX_APP_KEY, config.DROPBOX_APP_SECRET)
+
+
+# Set up the Dropbox client
+dbx_team = dropbox.DropboxTeam(DROPBOX_ACCESS_TOKEN)
+dbx = dbx_team.as_user(config.DROPBOX_TEAM_MEMBER_ID)
+dbx = dbx.with_path_root(dropbox.common.PathRoot.root(config.DROPBOX_NAMESPACE_ID))
+
+
+printed_files=[]
+
+
+def lambda_handler(event, context):
+    print("Lambda handler invoked")
+    # Extract webhook payload
+    payload = json.loads(event["body"])
+    # Modify the resource_url so that it ends in includeShipmentItems=True rather than False; this way we can access the order items
+    response = requests.get(payload['resource_url'][:-5] + "True", headers=headers)
+    data = response.json()
+    shipments = data['shipments']
+    print(f"Number of shipments: {len(shipments)}")
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(process_order, shipment) for shipment in shipments]
+        for future in as_completed(futures):
+            future.result()
+
+    # Move printed files to MLPs Sent
+    for printed_file in printed_files:
+        move_file_to_sent_folder(printed_file, sent_folder_path + "/")
+
+
+
+def process_order(order):
+    # Check if the order contains a lawn plan
+    order_number = order["orderNumber"]
+    print(f"Checking order number: {order_number}")
+    order_items = order['shipmentItems']
+
+    for item in order_items:
+        if (item['sku'].startswith('SUB') or item['sku'] in ['05000', '10000', '15000']) and item['sku'] not in ["SUB - LG - D", "SUB - LG - S", "SUB - LG - G"]:
+            print(f"Lawn plan found in order number {order_number}")
+            return search_and_print(order_number)
+    
+def get_folder_contents(folder):
+    result = dbx.files_list_folder(folder)
+    all_entries = result.entries
+
+    while result.has_more:
+        result = dbx.files_list_folder_continue(result.cursor)
+        all_entries.extend(result.entries)
+
+    return all_entries
+
+def move_file_to_sent_folder(source_path):
+    print(f"Moving file from {source_path} to {config.sent_folder_path}")
+    dest_path = config.sent_folder_path + source_path.split('/')[-1]
+    try:
+        dbx.files_move_v2(source_path, dest_path)
+        print(f"File moved to {dest_path}")
+    except Exception as e:
+        print(f"Error moving file: {e}")
+
+def search_and_print(order_number):
+    print(f"Searching for PDF file for order number {order_number}")
+    try:
+        # List of folders to search
+        folders_to_search = [config.folder_1, config.folder_2, config.sent_folder_path]
+
+        #if is_manual_order:
+            #folders_to_search = [sent_folder_path] + folders_to_search
+
+        for folder in folders_to_search:
+            print(f"Searching in folder: {folder}")
+
+            folder_contents = get_folder_contents(folder)
+
+            # Search for the file in the Dropbox folder
+            search_results = dbx.files_search(folder, f"*{order_number}.pdf")
+
+            if search_results.matches:
+                print(f"Found {len(search_results.matches)} match(es) for order number {order_number}")
+                for match in search_results.matches:
+                    filename = match.metadata.name
+                    if filename.endswith(f"{order_number}.pdf"):
+                        # Download and save the file
+                        file_path = match.metadata.path_display
+                        local_file_path = os.path.join('/tmp', filename)  # Save the file to the /tmp folder in Lambda
+                        dbx.files_download_to_file(local_file_path, file_path)
+                        print(f"File downloaded and saved to {local_file_path}")
+
+                        # Print the file
+                        printed_files.append(file_path)
+                        print_file(local_file_path, config.PRINTER_SERVICE_API_KEY, order_number)
+
+                        return
+            else:
+                print(f"No file found for order number {order_number}")
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+def print_file(local_file_path, printer_service_api_key, order_number):
+    print(f"Printing file for order number {order_number}")
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Basic {base64.b64encode(printer_service_api_key.encode()).decode()}'
+    }
+
+
+    # Read the local file and encode it in base64
+    with open(local_file_path, 'rb') as file:
+        file_content = file.read()
+        encoded_content = base64.b64encode(file_content).decode('utf-8')
+
+    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    print_job = {
+        'printerId': 72185140,
+        # Microsoft Print to PDF ID, for testing:
+        #'printerId':72123119,
+        'title': f'Lawn Plan with Unique ID {str(uuid.uuid4())} at time: {current_time}',
+        'contentType': 'pdf_base64',
+        'content': encoded_content,
+        'source': 'ShipStation Lawn Plan'
+    }
+
+    print(f"Sending print job: {print_job}")
+    response = requests.post('https://api.printnode.com/printjobs', headers=headers, json=print_job)
+
+    if response.status_code == 201:
+        print(f"Print job submitted successfully for order number {order_number}")
+    if response.status_code == 400:
+        print(f"Error submitting print job for order number {order_number}: {response.json()['message']}")
