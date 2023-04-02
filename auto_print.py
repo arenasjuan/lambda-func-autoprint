@@ -104,6 +104,8 @@ def get_folder_contents(folder):
     return all_entries
 
 def move_file_to_sent_folder(source_path):
+    if source_path == config.sent_folder_path:
+        return
     print(f"Moving file from {source_path} to {config.sent_folder_path}")
     dest_path = config.sent_folder_path + "/" + source_path.split('/')[-1]
     try:
