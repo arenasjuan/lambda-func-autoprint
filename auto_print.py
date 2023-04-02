@@ -69,7 +69,7 @@ def lambda_handler(event, context):
 
     # Move printed files to MLPs Sent
     for printed_file in printed_files:
-        move_file_to_sent_folder(printed_file, sent_folder_path + "/")
+        move_file_to_sent_folder(printed_file)
 
 
 
@@ -96,7 +96,7 @@ def get_folder_contents(folder):
 
 def move_file_to_sent_folder(source_path):
     print(f"Moving file from {source_path} to {config.sent_folder_path}")
-    dest_path = config.sent_folder_path + source_path.split('/')[-1]
+    dest_path = config.sent_folder_path + "/" + source_path.split('/')[-1]
     try:
         dbx.files_move_v2(source_path, dest_path)
         print(f"File moved to {dest_path}")
