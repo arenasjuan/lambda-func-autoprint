@@ -52,6 +52,7 @@ dbx = dbx.with_path_root(dropbox.common.PathRoot.root(config.DROPBOX_NAMESPACE_I
 
 printed_files=[]
 
+print_batch = str(uuid.uuid4())
 
 def lambda_handler(event, context):
     print("Lambda handler invoked")
@@ -118,11 +119,12 @@ def search_and_print(order_number):
     print(f"Searching for PDF file for order number {order_number}")
     try:
         # List of folders to search
-        folders_to_search = [config.folder_1, config.folder_2, config.sent_folder_path]
+        #folders_to_search = [config.folder_1, config.folder_2, config.sent_folder_path]
+        folders_to_search = [config.folder_1, config.folder_2]
 
         found_result = Queue()
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(search_folder, folder, order_number, found_result) for folder in folders_to_search]
             for future in as_completed(futures):
                 result = future.result()
@@ -186,7 +188,7 @@ def print_file(local_file_path, printer_service_api_key, order_number):
         'printerId': 72185140,
         # Microsoft Print to PDF ID, for testing:
         #'printerId':72123119,
-        'title': f'Lawn Plan with Unique ID {str(uuid.uuid4())} at time: {current_time}',
+        'title': f'Lawn Plan from batch {print_batch} at time: {current_time}',
         'contentType': 'pdf_base64',
         'content': encoded_content,
         'source': 'ShipStation Lawn Plan'
