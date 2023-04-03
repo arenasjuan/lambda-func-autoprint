@@ -88,11 +88,16 @@ def process_order(order):
     order_number = order["orderNumber"]
     print(f"Checking order number: {order_number}")
     order_items = order['shipmentItems']
+    folders_to_search = [config.folder_1, config.folder_2]
+    workers = 2
+    if order['advancedOptions']['source'] == None:
+        folders_to_search = [config.sent_folder_path]
+        workers = 1
 
     for item in order_items:
         if (item['sku'].startswith('SUB') or item['sku'] in ['05000', '10000', '15000']) and item['sku'] not in ["SUB - LG - D", "SUB - LG - S", "SUB - LG - G"]:
             print(f"Lawn plan found in order number {order_number}")
-            return search_and_print(order_number)
+            return search_and_print(order_number, folders_to_search, workers)
     
 def get_folder_contents(folder):
     result = dbx.files_list_folder(folder)
@@ -115,17 +120,14 @@ def move_file_to_sent_folder(source_path):
     except Exception as e:
         print(f"Error moving file: {e}")
 
-def search_and_print(order_number):
+def search_and_print(order_number, folders, threads):
     print(f"Searching for PDF file for order number {order_number}")
     try:
-        # List of folders to search
-        #folders_to_search = [config.folder_1, config.folder_2, config.sent_folder_path]
-        folders_to_search = [config.folder_1, config.folder_2]
 
         found_result = Queue()
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [executor.submit(search_folder, folder, order_number, found_result) for folder in folders_to_search]
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = [executor.submit(search_folder, folder, order_number, found_result) for folder in folders]
             for future in as_completed(futures):
                 result = future.result()
                 if result and found_result.empty():
