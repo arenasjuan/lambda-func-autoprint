@@ -54,6 +54,8 @@ printed_files=[]
 
 print_batch = str(uuid.uuid4())
 
+start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
 def lambda_handler(event, context):
     print("Lambda handler invoked")
     
@@ -190,7 +192,7 @@ def print_file(local_file_path, printer_service_api_key, order_number):
         'printerId': 72185140,
         # Microsoft Print to PDF ID, for testing:
         #'printerId':72123119,
-        'title': f'Lawn Plan from batch {print_batch} at time: {current_time}',
+        'title': f'Lawn Plan from batch {print_batch} started at time: {start_time}',
         'contentType': 'pdf_base64',
         'content': encoded_content,
         'source': 'ShipStation Lawn Plan'
