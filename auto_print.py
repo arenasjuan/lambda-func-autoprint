@@ -90,7 +90,7 @@ def process_order(order):
     order_items = order['shipmentItems']
     folders_to_search = [config.folder_1, config.folder_2]
     workers = 2
-    if order['advancedOptions']['source'] == None:
+    if order['advancedOptions']['source'] is None:
         folders_to_search = [config.sent_folder_path]
         workers = 1
 
