@@ -105,9 +105,9 @@ def process_order(order):
     order_items = order['shipmentItems']
     folders_to_search = [config.folder_1, config.folder_2]
     workers = 2
-    '''if order['advancedOptions']['source'] is None:
+    if order['advancedOptions']['storeId'] is 310067:
         folders_to_search = [config.sent_folder_path]
-        workers = 1 '''
+        workers = 1 
 
     for item in order_items:
         if (item['sku'].startswith('SUB') or item['sku'] in ['05000', '10000', '15000']) and item['sku'] not in ["SUB - LG - D", "SUB - LG - S", "SUB - LG - G"]:
