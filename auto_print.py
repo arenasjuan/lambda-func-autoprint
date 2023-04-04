@@ -8,6 +8,7 @@ from datetime import datetime
 import uuid
 import config
 from queue import Queue
+from dateutil import tz
 
 auth_string = f"{config.SHIPSTATION_API_KEY}:{config.SHIPSTATION_API_SECRET}"
 encoded_auth_string = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
@@ -54,7 +55,11 @@ printed_files=[]
 
 print_batch = str(uuid.uuid4())
 
-start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+# Get Pacific timezone object
+tz_us_pacific = tz.gettz('US/Pacific')
+
+# Get the current datetime in your local timezone
+start_time = datetime.now(tz_us_pacific)
 
 def lambda_handler(event, context):
     print("Lambda handler invoked")
@@ -68,9 +73,12 @@ def lambda_handler(event, context):
 
     # Extract webhook payload
     payload = json.loads(event["body"])
+    resource_url = payload["resource_url"]
+    print(f"Payload resource_url: {resource_url}")
     # Modify the resource_url so that it ends in includeShipmentItems=True rather than False; this way we can access the order items
     response = session.get(payload['resource_url'][:-5] + "True")
     data = response.json()
+    print(data)
     shipments = data['shipments']
     print(f"Number of shipments: {len(shipments)}")
 
@@ -92,9 +100,9 @@ def process_order(order):
     order_items = order['shipmentItems']
     folders_to_search = [config.folder_1, config.folder_2]
     workers = 2
-    if order['advancedOptions']['source'] is None:
+    '''if order['advancedOptions']['source'] is None:
         folders_to_search = [config.sent_folder_path]
-        workers = 1
+        workers = 1 '''
 
     for item in order_items:
         if (item['sku'].startswith('SUB') or item['sku'] in ['05000', '10000', '15000']) and item['sku'] not in ["SUB - LG - D", "SUB - LG - S", "SUB - LG - G"]:
@@ -185,8 +193,6 @@ def print_file(local_file_path, printer_service_api_key, order_number):
     with open(local_file_path, 'rb') as file:
         file_content = file.read()
         encoded_content = base64.b64encode(file_content).decode('utf-8')
-
-    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     print_job = {
         'printerId': 72185140,
