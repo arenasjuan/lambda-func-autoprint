@@ -105,7 +105,7 @@ def process_order(order):
     order_items = order['shipmentItems']
     folders_to_search = [config.folder_1, config.folder_2]
     workers = 2
-    if order['advancedOptions']['storeId'] is 310067:
+    if order['advancedOptions']['storeId'] == 310067:
         folders_to_search = [config.sent_folder_path]
         workers = 1 
 
