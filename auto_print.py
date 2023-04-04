@@ -4,12 +4,11 @@ import requests
 import base64
 import dropbox
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 import config
 from queue import Queue
-from dateutil import parser
-from dateutil import tz
+from dateutil import parser, tz
 
 auth_string = f"{config.SHIPSTATION_API_KEY}:{config.SHIPSTATION_API_SECRET}"
 encoded_auth_string = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
@@ -65,11 +64,6 @@ tz_us_pacific = tz.gettz('US/Pacific')
 start_time = datetime.now(tz_us_pacific)
 
 def lambda_handler(event, context):
-    event_time_str = event['requestContext']['requestTime']
-    event_time_utc = parser.parse(event_time_str)
-    event_time_local = event_time_utc.astimezone(tz_us_pacific)
-    print(f"The event was triggered at {event_time_local}")
-    
     global session
     session = requests.Session()
     session.headers.update({
@@ -78,7 +72,12 @@ def lambda_handler(event, context):
     })
 
     # Extract webhook payload
-    payload = json.loads(event["body"])
+    payload = json.loads(event['body'])
+    event_time_str = event['requestContext']['requestTime'][:-6]
+    datetime_obj = datetime.strptime(event_time_str, '%d/%b/%Y:%H:%M:%S')
+    event_time_utc = datetime_obj.replace(tzinfo=timezone.utc)
+    event_time_local = event_time_utc.astimezone(tz_us_pacific)
+    print(f"The event was triggered at {event_time_local}")
     resource_url = payload["resource_url"]
     print(f"Payload resource_url: {resource_url}")
     # Modify the resource_url so that it ends in includeShipmentItems=True rather than False; this way we can access the order items
