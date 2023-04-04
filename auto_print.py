@@ -125,7 +125,7 @@ def get_folder_contents(folder):
     return all_entries
 
 def move_file_to_sent_folder(source_path):
-    if source_path == config.sent_folder_path:
+    if os.path.dirname(source_path) == config.sent_folder_path:
         return
     print(f"Moving file from {source_path} to {config.sent_folder_path}")
     dest_path = config.sent_folder_path + "/" + source_path.split('/')[-1]
@@ -177,6 +177,7 @@ def search_folder(folder, order_number, found_result):
                 file_path = match.metadata.path_display
                 local_file_path = os.path.join('/tmp', filename)  # Save the file to the /tmp folder in Lambda
                 dbx.files_download_to_file(local_file_path, file_path)
+                print(f"File found for order number {order_number} in folder {folder}")
                 print(f"File downloaded and saved to {local_file_path}")
 
                 if found_result.empty():
