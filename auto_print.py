@@ -8,6 +8,7 @@ from datetime import datetime
 import uuid
 import config
 from queue import Queue
+from dateutil import parser
 from dateutil import tz
 
 auth_string = f"{config.SHIPSTATION_API_KEY}:{config.SHIPSTATION_API_SECRET}"
@@ -55,14 +56,19 @@ printed_files=[]
 
 print_batch = str(uuid.uuid4())
 
+
+
 # Get Pacific timezone object
 tz_us_pacific = tz.gettz('US/Pacific')
 
-# Get the current datetime in your local timezone
+# Get the current datetime in local timezone
 start_time = datetime.now(tz_us_pacific)
 
 def lambda_handler(event, context):
-    print("Lambda handler invoked")
+    event_time_str = event['requestContext']['requestTime']
+    event_time_utc = parser.parse(event_time_str)
+    event_time_local = event_time_utc.astimezone(tz_us_pacific)
+    print(f"The event was triggered at {event_time_local}")
     
     global session
     session = requests.Session()
