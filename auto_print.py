@@ -4,12 +4,11 @@ import requests
 import base64
 import dropbox
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime
 import uuid
 import config
 from queue import Queue
 from dateutil import tz
-from dateutil.parser import parse
 import re
 
 auth_string = f"{config.SHIPSTATION_API_KEY}:{config.SHIPSTATION_API_SECRET}"
@@ -94,7 +93,7 @@ def lambda_handler(event, context):
 
     # If shipment was created before Autoprint's timeout value, reject it
     if time_diff_minutes > 15:
-        return "Shipment is from too long ago, can't process"
+        return "Shipment too old, can't process"
 
     with ThreadPoolExecutor(max_workers=16) as executor:
         futures = [executor.submit(process_order, shipment) for shipment in shipments]
@@ -108,22 +107,13 @@ def lambda_handler(event, context):
 
 def calculate_time_difference(shipment_create_time_str, current_time):
     # Extract date and time components from the shipment_create_time_str
-    try:
-        year1, month1, day1, hour1, minute1, second1, microsecond1 = [
+    year1, month1, day1, hour1, minute1, second1, microsecond1 = [
             int(x) for x in re.findall(r'\d+', shipment_create_time_str.replace("T", " "))[:7]
         ]
-    except ValueError:
-        print(f"Error: Unable to parse shipment create time: {shipment_create_time_str}")
-        return None
 
-    # Extract date and time components from the current_time datetime object
-    year2, month2, day2, hour2, minute2, second2, microsecond2 = current_time.year, current_time.month, current_time.day, current_time.hour, current_time.minute, current_time.second, current_time.microsecond
-
-    # Calculate the time difference in seconds
-    total_seconds1 = (day1 * 86400) + (hour1 * 3600) + (minute1 * 60) + second1
-    total_seconds2 = (day2 * 86400) + (hour2 * 3600) + (minute2 * 60) + second2
-    time_diff_seconds = total_seconds2 - total_seconds1
-    time_diff_minutes = time_diff_seconds // 60
+    shipment_datetime = datetime(year1, month1, day1, hour1, minute1, second1, tzinfo=current_time.tzinfo)
+    time_diff = current_time - shipment_datetime
+    time_diff_minutes = time_diff.total_seconds() // 60
 
     return time_diff_minutes
 
