@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 import uuid
 import config
 from queue import Queue
-from dateutil import parser, tz
+from dateutil import tz
+from dateutil.parser import parse
+import re
 
 auth_string = f"{config.SHIPSTATION_API_KEY}:{config.SHIPSTATION_API_SECRET}"
 encoded_auth_string = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
@@ -63,6 +65,8 @@ tz_us_pacific = tz.gettz('US/Pacific')
 # Get the current datetime in local timezone
 start_time = datetime.now(tz_us_pacific)
 
+
+
 def lambda_handler(event, context):
     global session
     session = requests.Session()
@@ -73,21 +77,26 @@ def lambda_handler(event, context):
 
     # Extract webhook payload
     payload = json.loads(event['body'])
-    event_time_str = event['requestContext']['requestTime'][:-6]
-    datetime_obj = datetime.strptime(event_time_str, '%d/%b/%Y:%H:%M:%S')
-    event_time_utc = datetime_obj.replace(tzinfo=timezone.utc)
-    event_time_local = event_time_utc.astimezone(tz_us_pacific)
-    print(f"The event was triggered at {event_time_local}")
-    resource_url = payload["resource_url"]
+    resource_url = payload["resource_url"][:-5] + 'True'
     print(f"Payload resource_url: {resource_url}")
     # Modify the resource_url so that it ends in includeShipmentItems=True rather than False; this way we can access the order items
-    response = session.get(payload['resource_url'][:-5] + "True")
+    response = session.get(resource_url)
     data = response.json()
     print(data)
     shipments = data['shipments']
     print(f"Number of shipments: {len(shipments)}")
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    # Check the createDate value of the first shipment, which says when the shipment was created
+    first_shipment = shipments[0]
+    shipment_create_time_str = first_shipment['createDate']
+
+    time_diff_minutes = calculate_time_difference(shipment_create_time_str, start_time)
+
+    # If shipment was created before Autoprint's timeout value, reject it
+    if time_diff_minutes > 15:
+        return "Shipment is from too long ago, can't process"
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
         futures = [executor.submit(process_order, shipment) for shipment in shipments]
         for future in as_completed(futures):
             future.result()
@@ -95,6 +104,28 @@ def lambda_handler(event, context):
     # Move printed files to MLPs Sent
     for printed_file in printed_files:
         move_file_to_sent_folder(printed_file)
+
+
+def calculate_time_difference(shipment_create_time_str, current_time):
+    # Extract date and time components from the shipment_create_time_str
+    try:
+        year1, month1, day1, hour1, minute1, second1, microsecond1 = [
+            int(x) for x in re.findall(r'\d+', shipment_create_time_str.replace("T", " "))[:7]
+        ]
+    except ValueError:
+        print(f"Error: Unable to parse shipment create time: {shipment_create_time_str}")
+        return None
+
+    # Extract date and time components from the current_time datetime object
+    year2, month2, day2, hour2, minute2, second2, microsecond2 = current_time.year, current_time.month, current_time.day, current_time.hour, current_time.minute, current_time.second, current_time.microsecond
+
+    # Calculate the time difference in seconds
+    total_seconds1 = (day1 * 86400) + (hour1 * 3600) + (minute1 * 60) + second1
+    total_seconds2 = (day2 * 86400) + (hour2 * 3600) + (minute2 * 60) + second2
+    time_diff_seconds = total_seconds2 - total_seconds1
+    time_diff_minutes = time_diff_seconds // 60
+
+    return time_diff_minutes
 
 
 
