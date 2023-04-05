@@ -76,10 +76,10 @@ def lambda_handler(event, context):
 
     # Extract webhook payload
     payload = json.loads(event['body'])
-    resource_url = payload["resource_url"]
+    resource_url = payload["resource_url"][:-5] + 'True'
     print(f"Payload resource_url: {resource_url}")
     # Modify the resource_url so that it ends in includeShipmentItems=True rather than False; this way we can access the order items
-    response = session.get(resource_url[:-5] + "True") if resource_url.endswith("False") else session.get(resource_url)
+    response = session.get(resource_url)
     data = response.json()
     print(data)
     shipments = data['shipments']
