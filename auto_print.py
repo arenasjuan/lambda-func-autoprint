@@ -93,7 +93,8 @@ def lambda_handler(event, context):
 
     # If shipment was created before Autoprint's timeout value, reject it
     if time_diff_minutes > 15:
-        return "Shipment too old, can't process"
+        print("Shipment too old, can't process")
+        return
 
     with ThreadPoolExecutor(max_workers=16) as executor:
         futures = [executor.submit(process_order, shipment) for shipment in shipments]
