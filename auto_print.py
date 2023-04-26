@@ -94,18 +94,19 @@ def lambda_handler(event, context):
         "Authorization": f"Basic {encoded_auth_string}"
     })
 
-    # Extract webhook payload
     payload = json.loads(event['body'])
     resource_url = payload["resource_url"][:-5] + 'True'
     print(f"Payload resource_url: {resource_url}")
-    # Modify the resource_url so that it ends in includeShipmentItems=True rather than False; this way we can access the order items
     response = session.get(resource_url)
     data = response.json()
     print(data)
-    shipments = data['shipments']
-    print(f"Number of shipments: {len(shipments)}")
 
-    # Sort the shipments by order number
+    # Filter the shipments to only include those with lawn plans
+    shipments = [shipment for shipment in data['shipments'] if any(any(plan_sku in item['sku'] for plan_sku in config.lawn_plan_skus) for item in shipment['shipmentItems'])]
+
+    print(f"Number of shipments with lawn plans: {len(shipments)}")
+
+    # Sort the filtered shipments by order number
     sorted_shipments = sorted(shipments, key=lambda x: int(x['orderNumber'].split('-')[0]))
 
     # Process the orders sequentially
@@ -117,6 +118,7 @@ def lambda_handler(event, context):
         move_file_to_sent_folder(printed_file)
 
     print(f"Function failed for orders: {failed}")
+
 
 
 def calculate_time_difference(shipment_create_time_str, current_time):
@@ -160,63 +162,85 @@ def move_file_to_sent_folder(source_path):
     except Exception as e:
         print(f"Error moving file: {e}")
 
+def get_order_by_number(order_number):
+    url = f"https://ssapi.shipstation.com/orders?orderNumber={order_number}"
+    response = session.get(url)
+    data = response.json()
+    if data["orders"]:
+        return data["orders"][len(data["orders"])-1]
+    else:
+        failed_orders.append(order_number)
+        print(f"No orders found for order #{order_number}")
+        return
 
 def process_order(order):
     shipment_create_time_str = order['createDate']
     time_diff_minutes = calculate_time_difference(shipment_create_time_str, start_time)
 
-    # If shipment was created before Autoprint's timeout value, reject it
+    # Ignore shipments that are older than Autoprint's timeout value
     if time_diff_minutes > 15:
         print("Shipment too old, can't process")
         return
 
     order_number = order["orderNumber"]
     print(f"Checking order number: {order_number}")
-
-    # If the order number has a hyphen, then we're only interested in everything up to that hyphen
-    if "-" in order_number:
-        order_number = order_number.split("-")[0]
-
     order_items = order['shipmentItems']
-    folders_to_search = [config.folder_1, config.folder_2]
-    workers = 2
-    
-    if order['advancedOptions']['storeId'] == 310067:
-        folders_to_search = [config.sent_folder_path]
-        workers = 1
-    
+
+    # Get the order with its custom field information
+    order_with_tags = get_order_by_number(order_number)
+
+    folder_to_search = None
+
+    try:
+        custom_field1 = order_with_tags['advancedOptions']['customField1']
+        if "First" in custom_field1:
+            folder_to_search = config.folder_1
+        elif "Recurring" in custom_field1:
+            folder_to_search = config.folder_2
+    except KeyError:
+        if order['advancedOptions']['storeId'] == 310067:
+            folder_to_search = config.sent_folder_path
+
+    if folder_to_search is None:
+        print(f"Error:: Order #{order_number} seems to have a lawn plan but is not a manual order and not labelled 'First' or 'Recurring'; autoprint stopping")
+        return
+
+    lawn_plans = []
     for item in order_items:
         matching_key = get_matching_mlp_key(item['sku'], mlp_dict)
         if matching_key is not None and item['sku'] not in ["SUB - LG - D", "SUB - LG - S", "SUB - LG - G"]:
-            print(f"{order['orderNumber']} has a lawn plan")
             lawn_plan_name = mlp_dict[matching_key]
-            search_and_print(order_number, lawn_plan_name, folders_to_search, workers)
+            lawn_plans.append(lawn_plan_name)
 
-def search_and_print(order_number, lawn_plan_name, folders, threads):
+    if "-" in order_number:
+        order_number = order_number.split("-")[0]
+
+    with ThreadPoolExecutor(max_workers=len(lawn_plans)) as executor:
+        futures = [executor.submit(search_and_print, order_number, lawn_plan, folder_to_search) for lawn_plan in lawn_plans]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                print(f"Error in thread: {e}")
+
+def search_and_print(order_number, lawn_plan_name, folder):
     print(f"Searching for PDF file for order number {order_number} with lawn plan {lawn_plan_name}")
     try:
-        with ThreadPoolExecutor(max_workers=threads) as executor:
-            futures = [executor.submit(search_folder, folder, order_number, lawn_plan_name) for folder in folders]
-            found_results = []
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    found_results.extend(result)
-            
-            for local_file_path, file_path in found_results:
-                printed_files.append(file_path)
-                print_file(local_file_path, config.PRINTER_SERVICE_API_KEY, order_number)
-
+        found_results = search_folder(folder, order_number, lawn_plan_name)
+        for local_file_path, file_path in found_results:
+            printed_files.append(file_path)
+            print_file(local_file_path, config.PRINTER_SERVICE_API_KEY, order_number)
     except Exception as e:
         failed.append(order_number)
         print(f"Error: {e}")
+    return
+
 
 def search_folder(folder, order_number, lawn_plan_name):
     print(f"Searching in folder: {folder}")
     found_result = []
     search_results = dbx.files_search(folder, f"{order_number}")
     pdf_search_results = [result for result in search_results.matches if result.metadata.name.endswith('.pdf')]
-    
     if pdf_search_results:
         total_files = len(pdf_search_results)
         for index, match in enumerate(pdf_search_results):
@@ -229,12 +253,7 @@ def search_folder(folder, order_number, lawn_plan_name):
                 found_result.append((local_file_path, file_path))
     else:
         print(f"No file found for order number {order_number} with lawn plan {lawn_plan_name} in {folder}")
-
     return found_result
-
-
-
-
 
 def print_file(local_file_path, printer_service_api_key, order_number):
     print(f"Printing file for order number {order_number}")
