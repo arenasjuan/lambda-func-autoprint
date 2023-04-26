@@ -52,6 +52,26 @@ dbx = dbx_team.as_user(config.DROPBOX_TEAM_MEMBER_ID)
 dbx = dbx.with_path_root(dropbox.common.PathRoot.root(config.DROPBOX_NAMESPACE_ID))
 
 
+mlp_dict= {
+    "SUB - MLP Organic": "Organic Lawn Plan",
+    "SUB - MLP STD": "Magic Lawn Plan",
+    "SUB - MLPA": "Magic Lawn Plan Annual",
+    "SUB - OLFP": "Organic Lawn Fertilizer Plan Monthly",
+    "SUB - SFLP": "South Florida Lawn",
+    "SUB - TLP - S": "Lone Star Lawn Plan Semi Monthly",
+    "SUB - TLP": "Lone Star Lawn",
+    "SUB - SELP": "Southeast",
+    "SUB - GSLP": "Garden State Lawn",
+    "SUB - MLPS": "Seasonal",
+    "SUB - MLP PG": "Pristine Green",
+    "SUB - MLP PP": "Playground Plus",
+    "SUB - MLP SS": "Simply Sustainable",
+    "05000": "Magic Lawn Plan",
+    "10000": "Magic Lawn Plan",
+    "15000": "Magic Lawn Plan"
+}
+
+
 printed_files=[]
 
 print_batch = str(uuid.uuid4())
@@ -65,7 +85,7 @@ tz_us_pacific = tz.gettz('US/Pacific')
 start_time = datetime.now(tz_us_pacific)
 
 
-
+failed = []
 def lambda_handler(event, context):
     global session
     session = requests.Session()
@@ -85,25 +105,18 @@ def lambda_handler(event, context):
     shipments = data['shipments']
     print(f"Number of shipments: {len(shipments)}")
 
-    # Check the createDate value of the first shipment, which says when the shipment was created
-    first_shipment = shipments[0]
-    shipment_create_time_str = first_shipment['createDate']
+    # Sort the shipments by order number
+    sorted_shipments = sorted(shipments, key=lambda x: int(x['orderNumber'].split('-')[0]))
 
-    time_diff_minutes = calculate_time_difference(shipment_create_time_str, start_time)
-
-    # If shipment was created before Autoprint's timeout value, reject it
-    if time_diff_minutes > 15:
-        print("Shipment too old, can't process")
-        return
-
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        futures = [executor.submit(process_order, shipment) for shipment in shipments]
-        for future in as_completed(futures):
-            future.result()
+    # Process the orders sequentially
+    for shipment in sorted_shipments:
+        process_order(shipment)
 
     # Move printed files to MLPs Sent
     for printed_file in printed_files:
         move_file_to_sent_folder(printed_file)
+
+    print(f"Function failed for orders: {failed}")
 
 
 def calculate_time_difference(shipment_create_time_str, current_time):
@@ -119,22 +132,12 @@ def calculate_time_difference(shipment_create_time_str, current_time):
     return time_diff_minutes
 
 
+def get_matching_mlp_key(sku, mlp_dict):
+    for key in mlp_dict:
+        if sku.startswith(key):
+            return key
+    return None
 
-def process_order(order):
-    # Check if the order contains a lawn plan
-    order_number = order["orderNumber"]
-    print(f"Checking order number: {order_number}")
-    order_items = order['shipmentItems']
-    folders_to_search = [config.folder_1, config.folder_2]
-    workers = 2
-    if order['advancedOptions']['storeId'] == 310067:
-        folders_to_search = [config.sent_folder_path]
-        workers = 1 
-
-    for item in order_items:
-        if (item['sku'].startswith('SUB') or item['sku'] in ['05000', '10000', '15000']) and item['sku'] not in ["SUB - LG - D", "SUB - LG - S", "SUB - LG - G"]:
-            print(f"Lawn plan found in order number {order_number}")
-            return search_and_print(order_number, folders_to_search, workers)
     
 def get_folder_contents(folder):
     result = dbx.files_list_folder(folder)
@@ -157,55 +160,78 @@ def move_file_to_sent_folder(source_path):
     except Exception as e:
         print(f"Error moving file: {e}")
 
-def search_and_print(order_number, folders, threads):
-    print(f"Searching for PDF file for order number {order_number}")
-    try:
 
-        found_result = Queue()
+def process_order(order):
+    shipment_create_time_str = order['createDate']
+    time_diff_minutes = calculate_time_difference(shipment_create_time_str, start_time)
 
-        with ThreadPoolExecutor(max_workers=threads) as executor:
-            futures = [executor.submit(search_folder, folder, order_number, found_result) for folder in folders]
-            for future in as_completed(futures):
-                result = future.result()
-                if result and found_result.empty():
-                    found_result.put(result)
-                    local_file_path, file_path = result
-                    printed_files.append(file_path)
-                    print_file(local_file_path, config.PRINTER_SERVICE_API_KEY, order_number)
-                    return
-
-    except Exception as e:
-        print(f"Error: {e}")
-
-
-
-def search_folder(folder, order_number, found_result):
-    print(f"Searching in folder: {folder}")
-
-    if not found_result.empty():
+    # If shipment was created before Autoprint's timeout value, reject it
+    if time_diff_minutes > 15:
+        print("Shipment too old, can't process")
         return
 
-    folder_contents = get_folder_contents(folder)
+    order_number = order["orderNumber"]
+    print(f"Checking order number: {order_number}")
 
-    # Search for the file in the Dropbox folder
-    search_results = dbx.files_search(folder, f"*{order_number}.pdf")
+    # If the order number has a hyphen, then we're only interested in everything up to that hyphen
+    if "-" in order_number:
+        order_number = order_number.split("-")[0]
 
-    if search_results.matches:
-        print(f"Found {len(search_results.matches)} match(es) for order number {order_number}")
-        for match in search_results.matches:
+    order_items = order['shipmentItems']
+    folders_to_search = [config.folder_1, config.folder_2]
+    workers = 2
+    
+    if order['advancedOptions']['storeId'] == 310067:
+        folders_to_search = [config.sent_folder_path]
+        workers = 1
+    
+    for item in order_items:
+        matching_key = get_matching_mlp_key(item['sku'], mlp_dict)
+        if matching_key is not None and item['sku'] not in ["SUB - LG - D", "SUB - LG - S", "SUB - LG - G"]:
+            print(f"{order['orderNumber']} has a lawn plan")
+            lawn_plan_name = mlp_dict[matching_key]
+            search_and_print(order_number, lawn_plan_name, folders_to_search, workers)
+
+def search_and_print(order_number, lawn_plan_name, folders, threads):
+    print(f"Searching for PDF file for order number {order_number} with lawn plan {lawn_plan_name}")
+    try:
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = [executor.submit(search_folder, folder, order_number, lawn_plan_name) for folder in folders]
+            found_results = []
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    found_results.extend(result)
+            
+            for local_file_path, file_path in found_results:
+                printed_files.append(file_path)
+                print_file(local_file_path, config.PRINTER_SERVICE_API_KEY, order_number)
+
+    except Exception as e:
+        failed.append(order_number)
+        print(f"Error: {e}")
+
+def search_folder(folder, order_number, lawn_plan_name):
+    print(f"Searching in folder: {folder}")
+    found_result = []
+    search_results = dbx.files_search(folder, f"{order_number}")
+    pdf_search_results = [result for result in search_results.matches if result.metadata.name.endswith('.pdf')]
+    
+    if pdf_search_results:
+        total_files = len(pdf_search_results)
+        for index, match in enumerate(pdf_search_results):
             filename = match.metadata.name
-            if filename.endswith(f"{order_number}.pdf"):
-                # Download and save the file
+            if order_number in filename and lawn_plan_name in filename:
                 file_path = match.metadata.path_display
-                local_file_path = os.path.join('/tmp', filename)  # Save the file to the /tmp folder in Lambda
+                local_file_path = os.path.join('/tmp', filename)
                 dbx.files_download_to_file(local_file_path, file_path)
-                print(f"File found for order number {order_number} in folder {folder}")
-                print(f"File downloaded and saved to {local_file_path}")
-
-                if found_result.empty():
-                    return local_file_path, file_path
+                print(f"Order #{order_number} (Plan {index + 1} of {total_files}): found {filename} in folder {folder}\nFile downloaded and saved to {local_file_path}")
+                found_result.append((local_file_path, file_path))
     else:
-        print(f"No file found for order number {order_number} in {folder}")
+        print(f"No file found for order number {order_number} with lawn plan {lawn_plan_name} in {folder}")
+
+    return found_result
+
 
 
 
@@ -223,9 +249,7 @@ def print_file(local_file_path, printer_service_api_key, order_number):
         encoded_content = base64.b64encode(file_content).decode('utf-8')
 
     print_job = {
-        'printerId': 72185140,
-        # Microsoft Print to PDF ID, for testing:
-        #'printerId':72123119,
+        'printerId': config.DESKTOP_PRINTER_ID,
         'title': f'Lawn Plan from batch {print_batch} started at time: {start_time}',
         'contentType': 'pdf_base64',
         'content': encoded_content,
@@ -238,4 +262,5 @@ def print_file(local_file_path, printer_service_api_key, order_number):
     if response.status_code == 201:
         print(f"Print job submitted successfully for order number {order_number}")
     if response.status_code == 400:
+        failed.append(order_number)
         print(f"Error submitting print job for order number {order_number}: {response.json()['message']}")
