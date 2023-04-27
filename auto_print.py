@@ -104,7 +104,7 @@ def lambda_handler(event, context):
         "Authorization": f"Basic {encoded_auth_string}"
     })
 
-    payload = json.loads(event['body'])
+    payload = json.loads(event['Records'][0]['body'])
     resource_url = payload["resource_url"][:-5] + 'True'
     print(f"Payload resource_url: {resource_url}")
     response = session.get(resource_url)
@@ -116,8 +116,14 @@ def lambda_handler(event, context):
 
     print(f"Number of shipments with lawn plans: {len(shipments)}")
 
+    # Print the order numbers before sorting
+    print("Order numbers before sorting:", [shipment["orderNumber"] for shipment in shipments])
+
     # Sort the filtered shipments by order number
     sorted_shipments = sorted(shipments, key=lambda x: int(x['orderNumber'].split('-')[0]))
+
+    # Print the order numbers after sorting
+    print("Order numbers after sorting:", [shipment["orderNumber"] for shipment in sorted_shipments])
 
     worker_thread = Thread(target=move_file_worker)
     worker_thread.start()
@@ -127,7 +133,7 @@ def lambda_handler(event, context):
         process_order(shipment)
 
     # Wait for the worker thread to finish moving all files
-    file_move_queue.put((None, None))
+    file_move_queue.put(None)
     worker_thread.join()
 
     print(f"Function failed for orders: {failed}")
@@ -215,7 +221,8 @@ def process_order(order):
             folder_to_search = config.sent_folder_path
 
     if folder_to_search is None:
-        print(f"Error:: Order #{order_number} seems to have a lawn plan but is not a manual order and not labelled 'First' or 'Recurring'; autoprint stopping")
+        failed.append(order_number)
+        print(f"Error: Order #{order_number} seems to have a lawn plan but is not a manual order and not labelled 'First' or 'Recurring'; autoprint stopping")
         return
 
     lawn_plans = []
