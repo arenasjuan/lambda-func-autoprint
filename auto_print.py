@@ -8,6 +8,7 @@ from datetime import datetime
 import uuid
 import config
 from queue import Queue
+from threading import Thread
 from dateutil import tz
 import re
 
@@ -72,8 +73,6 @@ mlp_dict= {
 }
 
 
-printed_files=[]
-
 print_batch = str(uuid.uuid4())
 
 
@@ -84,8 +83,19 @@ tz_us_pacific = tz.gettz('US/Pacific')
 # Get the current datetime in local timezone
 start_time = datetime.now(tz_us_pacific)
 
+file_move_queue = Queue()
 
 failed = []
+
+def move_file_worker():
+    while True:
+        source_path = file_move_queue.get()
+        if source_path is None:
+            break
+
+        move_file_to_sent_folder(source_path)
+        file_move_queue.task_done()
+
 def lambda_handler(event, context):
     global session
     session = requests.Session()
@@ -109,13 +119,16 @@ def lambda_handler(event, context):
     # Sort the filtered shipments by order number
     sorted_shipments = sorted(shipments, key=lambda x: int(x['orderNumber'].split('-')[0]))
 
+    worker_thread = Thread(target=move_file_worker)
+    worker_thread.start()
+
     # Process the orders sequentially
     for shipment in sorted_shipments:
         process_order(shipment)
 
-    # Move printed files to MLPs Sent
-    for printed_file in printed_files:
-        move_file_to_sent_folder(printed_file)
+    # Wait for the worker thread to finish moving all files
+    file_move_queue.put((None, None))
+    worker_thread.join()
 
     print(f"Function failed for orders: {failed}")
 
@@ -228,8 +241,7 @@ def search_and_print(order_number, lawn_plan_name, folder):
     try:
         found_results = search_folder(folder, order_number, lawn_plan_name)
         for local_file_path, file_path in found_results:
-            printed_files.append(file_path)
-            print_file(local_file_path, config.PRINTER_SERVICE_API_KEY, order_number)
+            print_file(file_path, config.PRINTER_SERVICE_API_KEY, order_number)
     except Exception as e:
         failed.append(order_number)
         print(f"Error: {e}")
@@ -255,14 +267,16 @@ def search_folder(folder, order_number, lawn_plan_name):
         print(f"No file found for order number {order_number} with lawn plan {lawn_plan_name} in {folder}")
     return found_result
 
-def print_file(local_file_path, printer_service_api_key, order_number):
+def print_file(file_path, printer_service_api_key, order_number):
     print(f"Printing file for order number {order_number}")
     headers = {
         'Content-Type': 'application/json',
         'Authorization': f'Basic {base64.b64encode(printer_service_api_key.encode()).decode()}'
     }
 
-    # Read the local file and encode it in base64
+    # Download the remote file and encode it in base64
+    local_file_path = os.path.join('/tmp', os.path.basename(file_path))
+    dbx.files_download_to_file(local_file_path, file_path)
     with open(local_file_path, 'rb') as file:
         file_content = file.read()
         encoded_content = base64.b64encode(file_content).decode('utf-8')
@@ -280,6 +294,8 @@ def print_file(local_file_path, printer_service_api_key, order_number):
 
     if response.status_code == 201:
         print(f"Print job submitted successfully for order number {order_number}")
+        file_move_queue.put(file_path)
     if response.status_code == 400:
         failed.append(order_number)
         print(f"Error submitting print job for order number {order_number}: {response.json()['message']}")
+
