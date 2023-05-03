@@ -53,25 +53,6 @@ dbx = dbx_team.as_user(config.DROPBOX_TEAM_MEMBER_ID)
 dbx = dbx.with_path_root(dropbox.common.PathRoot.root(config.DROPBOX_NAMESPACE_ID))
 
 
-mlp_dict= {
-    "SUB - MLP Organic": "Organic",
-    "SUB - MLP STD": "Magic",
-    "SUB - MLPA": "Annual",
-    "SUB - OLFP": "Organic",
-    "SUB - SFLP": "Florida",
-    "SUB - TLP": "Lone",
-    "SUB - SELP": "Southeast",
-    "SUB - GSLP": "State",
-    "SUB - MLPS": "Seasonal",
-    "SUB - MLP PG": "Pristine",
-    "SUB - MLP PP": "Plus",
-    "SUB - MLP SS": "Simply",
-    "05000": "Magic",
-    "10000": "Magic",
-    "15000": "Magic"
-}
-
-
 print_batch = str(uuid.uuid4())
 
 
@@ -152,8 +133,8 @@ def calculate_time_difference(shipment_create_time_str, current_time):
     return time_diff_minutes
 
 
-def get_matching_mlp_key(sku, mlp_dict):
-    for key in mlp_dict:
+def get_matching_mlp_key(sku):
+    for key in config.mlp_dict:
         if sku.startswith(key):
             return key
     return None
@@ -225,10 +206,9 @@ def process_order(order):
 
     lawn_plans = []
     for item in order_items:
-        matching_key = get_matching_mlp_key(item['sku'], mlp_dict)
-        if matching_key is not None and item['sku'] not in ["SUB - LG - D", "SUB - LG - S", "SUB - LG - G"]:
-            lawn_plan_name = mlp_dict[matching_key]
-            lawn_plans.append(lawn_plan_name)
+        matching_key = get_matching_mlp_key(item['sku'])
+        lawn_plan_name = config.mlp_dict[matching_key]
+        lawn_plans.append(lawn_plan_name)
 
     if "-" in order_number:
         order_number = order_number.split("-")[0]
