@@ -205,7 +205,9 @@ def process_order(order):
         return
 
     lawn_plans = []
-    for item in order_items:
+    lawn_plan_items = [item for item in order_items for plan_sku in config.lawn_plan_skus if plan_sku in item['sku']]
+
+    for item in lawn_plan_items:
         matching_key = get_matching_mlp_key(item['sku'])
         lawn_plan_name = config.mlp_dict[matching_key]
         lawn_plans.append(lawn_plan_name)
