@@ -161,12 +161,12 @@ def move_file_to_sent_folder(source_path):
     except Exception as e:
         print(f"Error moving file: {e}")
 
-def get_order_by_number(order_number):
-    url = f"https://ssapi.shipstation.com/orders?orderNumber={order_number}"
+def get_order_by_number(order):
+    url = f"https://ssapi.shipstation.com/orders?orderNumber={order['orderNumber']}"
     response = session.get(url)
     data = response.json()
     if data["orders"]:
-        return next(order for order in data['orders'] if order['orderNumber'] == order_number)
+        return next(o for o in data['orders'] if o['orderId'] == order['orderId'])
     else:
         failed_orders.append(order_number)
         print(f"No orders found for order #{order_number}")
@@ -191,7 +191,7 @@ def process_order(order):
         folder_to_search = config.sent_folder_path
     else:
         # Get the order with its custom field information
-        order_with_tags = get_order_by_number(order_number)
+        order_with_tags = get_order_by_number(order)
         custom_field1 = order_with_tags['advancedOptions'].get('customField1', None)
         if custom_field1 is not None:
             if "First" in custom_field1:
