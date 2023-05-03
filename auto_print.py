@@ -54,22 +54,21 @@ dbx = dbx.with_path_root(dropbox.common.PathRoot.root(config.DROPBOX_NAMESPACE_I
 
 
 mlp_dict= {
-    "SUB - MLP Organic": "Organic Lawn Plan",
-    "SUB - MLP STD": "Magic Lawn Plan",
-    "SUB - MLPA": "Magic Lawn Plan Annual",
-    "SUB - OLFP": "Organic Lawn Fertilizer Plan Monthly",
-    "SUB - SFLP": "South Florida Lawn",
-    "SUB - TLP - S": "Lone Star Lawn Plan Semi Monthly",
-    "SUB - TLP": "Lone Star Lawn",
+    "SUB - MLP Organic": "Organic",
+    "SUB - MLP STD": "Magic",
+    "SUB - MLPA": "Annual",
+    "SUB - OLFP": "Organic",
+    "SUB - SFLP": "Florida",
+    "SUB - TLP": "Lone",
     "SUB - SELP": "Southeast",
-    "SUB - GSLP": "Garden State Lawn",
+    "SUB - GSLP": "State",
     "SUB - MLPS": "Seasonal",
-    "SUB - MLP PG": "Pristine Green",
-    "SUB - MLP PP": "Playground Plus",
-    "SUB - MLP SS": "Simply Sustainable",
-    "05000": "Magic Lawn Plan",
-    "10000": "Magic Lawn Plan",
-    "15000": "Magic Lawn Plan"
+    "SUB - MLP PG": "Pristine",
+    "SUB - MLP PP": "Plus",
+    "SUB - MLP SS": "Simply",
+    "05000": "Magic",
+    "10000": "Magic",
+    "15000": "Magic"
 }
 
 
@@ -186,7 +185,7 @@ def get_order_by_number(order_number):
     response = session.get(url)
     data = response.json()
     if data["orders"]:
-        return data["orders"][len(data["orders"])-1]
+        return next(order for order in data['orders'] if order['orderNumber'] == order_number)
     else:
         failed_orders.append(order_number)
         print(f"No orders found for order #{order_number}")
@@ -205,20 +204,19 @@ def process_order(order):
     print(f"Checking order number: {order_number}")
     order_items = order['shipmentItems']
 
-    # Get the order with its custom field information
-    order_with_tags = get_order_by_number(order_number)
-
     folder_to_search = None
 
-    try:
-        custom_field1 = order_with_tags['advancedOptions']['customField1']
-        if "First" in custom_field1:
-            folder_to_search = config.folder_1
-        elif "Recurring" in custom_field1:
-            folder_to_search = config.folder_2
-    except KeyError:
-        if order['advancedOptions']['storeId'] == 310067:
-            folder_to_search = config.sent_folder_path
+    if order['advancedOptions'].get('storeId') == 310067:
+        folder_to_search = config.sent_folder_path
+    else:
+        # Get the order with its custom field information
+        order_with_tags = get_order_by_number(order_number)
+        custom_field1 = order_with_tags['advancedOptions'].get('customField1', None)
+        if custom_field1 is not None:
+            if "First" in custom_field1:
+                folder_to_search = config.folder_1
+            elif "Recurring" in custom_field1:
+                folder_to_search = config.folder_2
 
     if folder_to_search is None:
         failed.append(order_number)
@@ -305,4 +303,3 @@ def print_file(file_path, printer_service_api_key, order_number):
     if response.status_code == 400:
         failed.append(order_number)
         print(f"Error submitting print job for order number {order_number}: {response.json()['message']}")
-
