@@ -213,6 +213,15 @@ def process_order(order):
             elif "Recurring" in custom_field1:
                 folder_to_search = config.folder_2
 
+            #Search through the order tags if the relevant keywords aren't in Custom Field 1
+            else:
+                tags = order.get('tagIds', None)
+                if tags is not None:
+                    if 62743 in tags:
+                        folder_to_search = config.folder_1
+                    elif 62744 in tags:
+                        folder_to_search = config.folder_2
+
     if folder_to_search is None:
         failed.append(original_order_number)
         print(f"(Log for #{original_order_number}) Error: Order #{original_order_number} seems to have a lawn plan but is not a manual order and not labelled 'First' or 'Recurring'; checking 'Sent' folder", flush=True)
