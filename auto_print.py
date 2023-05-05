@@ -8,7 +8,7 @@ from datetime import datetime
 import uuid
 import config
 from queue import Queue
-from threading import Thread
+from threading import Thread, Lock
 from dateutil import tz
 import re
 
@@ -55,7 +55,9 @@ dbx = dbx.with_path_root(dropbox.common.PathRoot.root(config.DROPBOX_NAMESPACE_I
 
 print_batch = str(uuid.uuid4())
 
-
+# Define the shared dictionary and lock
+print_counter_dict = {}
+print_counter_lock = Lock()
 
 # Get Pacific timezone object
 tz_us_pacific = tz.gettz('US/Pacific')
@@ -68,13 +70,17 @@ file_move_queue = Queue()
 failed = []
 
 def move_file_worker():
+    global failed
     while True:
-        source_path = file_move_queue.get()
-        if source_path is None:
+        file_info = file_move_queue.get()
+        if file_info is None:
             break
 
-        move_file_to_sent_folder(source_path)
+        source_path, order_number = file_info
+        move_file_to_sent_folder(source_path, order_number)
         file_move_queue.task_done()
+
+
 
 def lambda_handler(event, context):
     global session
@@ -92,7 +98,7 @@ def lambda_handler(event, context):
     print(data)
 
     # Filter the shipments to only include those with lawn plans
-    shipments = [shipment for shipment in data['shipments'] if any(any(plan_sku in item['sku'] for plan_sku in config.lawn_plan_skus) for item in shipment['shipmentItems'])]
+    shipments = [shipment for shipment in data['shipments'] if shipment['shipmentItems'] is not None and any(any(plan_sku in item['sku'] for plan_sku in config.lawn_plan_skus) for item in shipment['shipmentItems'])]
 
     print(f"Number of shipments with lawn plans: {len(shipments)}")
 
@@ -150,16 +156,20 @@ def get_folder_contents(folder):
 
     return all_entries
 
-def move_file_to_sent_folder(source_path):
+def move_file_to_sent_folder(source_path, order_number):
     if os.path.dirname(source_path) == config.sent_folder_path:
-        return
-    print(f"Moving file from {source_path} to {config.sent_folder_path}")
+        print(f"(Log for #{order_number}) File already in 'Sent', no need to move")
+        return True
     dest_path = config.sent_folder_path + "/" + source_path.split('/')[-1]
     try:
         dbx.files_move_v2(source_path, dest_path)
-        print(f"File moved to {dest_path}")
+        print(f"(Log for #{order_number}) File moved from {source_path} to {dest_path}")
+        return True
     except Exception as e:
-        print(f"Error moving file: {e}")
+        failed.append(order_number)
+        print(f"(Log for #{order_number}) Error moving file: {e}")
+        return False
+
 
 def get_order_by_number(order):
     url = f"https://ssapi.shipstation.com/orders?orderNumber={order['orderNumber']}"
@@ -168,22 +178,26 @@ def get_order_by_number(order):
     if data["orders"]:
         return next(o for o in data['orders'] if o['orderId'] == order['orderId'])
     else:
-        failed_orders.append(order_number)
-        print(f"No orders found for order #{order_number}")
+        failed_orders.append(order['orderNumber'])
+        print(f"(Log for #{order['orderNumber']}) No orders found for order #{order['orderNumber']}")
         return
 
 def process_order(order):
+    original_order_number = order["orderNumber"]
+
     shipment_create_time_str = order['createDate']
     time_diff_minutes = calculate_time_difference(shipment_create_time_str, start_time)
 
     # Ignore shipments that are older than Autoprint's timeout value
     if time_diff_minutes > 15:
-        print("Shipment too old, can't process")
+        print(f"(Log for #{original_order_number}) Shipment too old, can't process")
         return
 
-    order_number = order["orderNumber"]
-    print(f"Checking order number: {order_number}")
+    
     order_items = order['shipmentItems']
+    searchable_order_number = original_order_number
+    if "-" in searchable_order_number:
+        searchable_order_number = searchable_order_number.split("-")[0]
 
     folder_to_search = None
 
@@ -200,62 +214,81 @@ def process_order(order):
                 folder_to_search = config.folder_2
 
     if folder_to_search is None:
-        failed.append(order_number)
-        print(f"Error: Order #{order_number} seems to have a lawn plan but is not a manual order and not labelled 'First' or 'Recurring'; autoprint stopping")
-        return
+        failed.append(original_order_number)
+        print(f"(Log for #{original_order_number}) Error: Order #{original_order_number} seems to have a lawn plan but is not a manual order and not labelled 'First' or 'Recurring'; checking 'Sent' folder")
+        folder_to_search = config.sent_folder_path
 
-    lawn_plans = []
+    lawn_plan_keywords = []
     lawn_plan_items = [item for item in order_items for plan_sku in config.lawn_plan_skus if plan_sku in item['sku']]
-
     for item in lawn_plan_items:
         matching_key = get_matching_mlp_key(item['sku'])
-        lawn_plan_name = config.mlp_dict[matching_key]
-        lawn_plans.append(lawn_plan_name)
+        lawn_plan_keyword = config.mlp_dict[matching_key]
+        lawn_plan_keywords.append(lawn_plan_keyword)
 
-    if "-" in order_number:
-        order_number = order_number.split("-")[0]
+    print(f"(Log for #{original_order_number}) Preparing search for order #{original_order_number} with keyword(s) {lawn_plan_keywords}")
 
-    with ThreadPoolExecutor(max_workers=len(lawn_plans)) as executor:
-        futures = [executor.submit(search_and_print, order_number, lawn_plan, folder_to_search) for lawn_plan in lawn_plans]
+    # Initialize print counter for current order
+    with print_counter_lock:
+        print_counter_dict[original_order_number] = 0
+
+    with ThreadPoolExecutor(max_workers=len(lawn_plan_keywords)) as executor:
+        futures = [executor.submit(search_and_print, original_order_number, searchable_order_number, lawn_plan_keyword, folder_to_search, len(lawn_plan_keywords), i + 1) for i, lawn_plan_keyword in enumerate(lawn_plan_keywords)]
         for future in as_completed(futures):
             try:
                 future.result()
             except Exception as e:
-                print(f"Error in thread: {e}")
+                print(f"(Log for #{original_order_number}) Error in thread: {e}")
 
-def search_and_print(order_number, lawn_plan_name, folder):
-    print(f"Searching for PDF file for order number {order_number} with lawn plan {lawn_plan_name}")
+
+def search_and_print(original_order_number, searchable_order_number, lawn_plan_keyword, folder, total_plans, plan_index):
+    folder_name = "'First'" if folder == config.folder_1 else "'Recurring'" if folder == config.folder_2 else "'Sent'"
+    print(f"(Log for #{original_order_number}) Searching for lawn plan for order #{original_order_number} with keyword \'{lawn_plan_keyword}\' in {folder_name} folder")
+
     try:
-        found_results = search_folder(folder, order_number, lawn_plan_name)
+        found_results = search_folder(folder, folder_name, searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index)
         for local_file_path, file_path in found_results:
-            print_file(file_path, config.PRINTER_SERVICE_API_KEY, order_number)
+            with print_counter_lock:
+                print_counter_dict[original_order_number] += 1
+            print_file(file_path, config.PRINTER_SERVICE_API_KEY, original_order_number)
     except Exception as e:
-        failed.append(order_number)
+        failed.append(original_order_number)
         print(f"Error: {e}")
     return
 
-
-def search_folder(folder, order_number, lawn_plan_name):
-    print(f"Searching in folder: {folder}")
+def search_folder(folder, folder_name, searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index):
     found_result = []
-    search_results = dbx.files_search(folder, f"{order_number}")
-    pdf_search_results = [result for result in search_results.matches if result.metadata.name.endswith('.pdf')]
-    if pdf_search_results:
-        total_files = len(pdf_search_results)
-        for index, match in enumerate(pdf_search_results):
+    search_results = dbx.files_search(folder, f"{searchable_order_number}")
+    file_found = False
+
+    if search_results.matches:
+        for index, match in enumerate(search_results.matches):
             filename = match.metadata.name
-            if order_number in filename and lawn_plan_name in filename:
+            if lawn_plan_keyword in filename:
                 file_path = match.metadata.path_display
                 local_file_path = os.path.join('/tmp', filename)
                 dbx.files_download_to_file(local_file_path, file_path)
-                print(f"Order #{order_number} (Plan {index + 1} of {total_files}): found {filename} in folder {folder}\nFile downloaded and saved to {local_file_path}")
                 found_result.append((local_file_path, file_path))
-    else:
-        print(f"No file found for order number {order_number} with lawn plan {lawn_plan_name} in {folder}")
+                file_found = True
+                print(f"(Log for #{original_order_number}) Order #{original_order_number} (Plan {plan_index} of {total_plans}): found {file_path} in {folder_name} folder")
+
+    if not file_found:
+        print(f"(Log for #{original_order_number}) No file found for order number {original_order_number} with lawn plan keyword \'{lawn_plan_keyword}\' in {folder_name}")
+
+        # Search in the Sent folder if the current folder is not the Sent folder
+        if folder != config.sent_folder_path:
+            print(f"(Log for #{original_order_number}) Now searching for lawn plan with keyword \'{lawn_plan_keyword}\' for order #{original_order_number} in 'Sent' folder")
+            found_result = search_folder(config.sent_folder_path, 'Sent', searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index)
+            # If the search in the Sent folder fails, print an error message
+            if not found_result:
+                failed.append(original_order_number)
+                print(f"(Log for #{original_order_number}) (Log for #{original_order_number}) Error: No file found for order #{original_order_number} in 'Sent' folder; ending search")
+        else:
+            failed.append(original_order_number)
+            print(f"(Log for #{original_order_number}) Error: No file found for order #{original_order_number} in 'Sent' folder; ending search")
     return found_result
 
-def print_file(file_path, printer_service_api_key, order_number):
-    print(f"Printing file for order number {order_number}")
+def print_file(file_path, printer_service_api_key, original_order_number):
+    print(f"(Log for #{original_order_number}) Printing file for order #{original_order_number}")
     headers = {
         'Content-Type': 'application/json',
         'Authorization': f'Basic {base64.b64encode(printer_service_api_key.encode()).decode()}'
@@ -276,12 +309,12 @@ def print_file(file_path, printer_service_api_key, order_number):
         'source': 'ShipStation Lawn Plan'
     }
 
-    print(f"Sending print job: {print_job}")
+    print(f"(Log for #{original_order_number}) Sending print job: {print_job}")
     response = session.post('https://api.printnode.com/printjobs', headers=headers, json=print_job)
 
     if response.status_code == 201:
-        print(f"Print job submitted successfully for order number {order_number}")
-        file_move_queue.put(file_path)
+        print(f"(Log for #{original_order_number}) Print job submitted successfully for order #{original_order_number}")
+        file_move_queue.put((file_path, original_order_number))
     if response.status_code == 400:
-        failed.append(order_number)
-        print(f"Error submitting print job for order number {order_number}: {response.json()['message']}")
+        file_move_queue.put((file_path, original_order_number))
+        print(f"(Log for #{original_order_number}) Error submitting print job for order #{original_order_number}: {response.json()['message']}")
