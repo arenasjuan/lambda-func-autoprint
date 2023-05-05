@@ -158,16 +158,16 @@ def get_folder_contents(folder):
 
 def move_file_to_sent_folder(source_path, order_number):
     if os.path.dirname(source_path) == config.sent_folder_path:
-        print(f"(Log for #{order_number}) File already in 'Sent', no need to move")
+        print(f"(Log for #{order_number}) File already in 'Sent', no need to move", flush=True)
         return True
     dest_path = config.sent_folder_path + "/" + source_path.split('/')[-1]
     try:
         dbx.files_move_v2(source_path, dest_path)
-        print(f"(Log for #{order_number}) File moved from {source_path} to {dest_path}")
+        print(f"(Log for #{order_number}) File moved from {source_path} to {dest_path}", flush=True)
         return True
     except Exception as e:
         failed.append(order_number)
-        print(f"(Log for #{order_number}) Error moving file: {e}")
+        print(f"(Log for #{order_number}) Error moving file: {e}", flush=True)
         return False
 
 
@@ -179,7 +179,7 @@ def get_order_by_number(order):
         return next(o for o in data['orders'] if o['orderId'] == order['orderId'])
     else:
         failed_orders.append(order['orderNumber'])
-        print(f"(Log for #{order['orderNumber']}) No orders found for order #{order['orderNumber']}")
+        print(f"(Log for #{order['orderNumber']}) No orders found for order #{order['orderNumber']}", flush=True)
         return
 
 def process_order(order):
@@ -190,7 +190,7 @@ def process_order(order):
 
     # Ignore shipments that are older than Autoprint's timeout value
     if time_diff_minutes > 15:
-        print(f"(Log for #{original_order_number}) Shipment too old, can't process")
+        print(f"(Log for #{original_order_number}) Shipment too old, can't process", flush=True)
         return
 
     
@@ -215,7 +215,7 @@ def process_order(order):
 
     if folder_to_search is None:
         failed.append(original_order_number)
-        print(f"(Log for #{original_order_number}) Error: Order #{original_order_number} seems to have a lawn plan but is not a manual order and not labelled 'First' or 'Recurring'; checking 'Sent' folder")
+        print(f"(Log for #{original_order_number}) Error: Order #{original_order_number} seems to have a lawn plan but is not a manual order and not labelled 'First' or 'Recurring'; checking 'Sent' folder", flush=True)
         folder_to_search = config.sent_folder_path
 
     lawn_plan_keywords = []
@@ -225,7 +225,7 @@ def process_order(order):
         lawn_plan_keyword = config.mlp_dict[matching_key]
         lawn_plan_keywords.append(lawn_plan_keyword)
 
-    print(f"(Log for #{original_order_number}) Preparing search for order #{original_order_number} with keyword(s) {lawn_plan_keywords}")
+    print(f"(Log for #{original_order_number}) Preparing search for order #{original_order_number} with keyword(s) {lawn_plan_keywords}", flush=True)
 
     # Initialize print counter for current order
     with print_counter_lock:
@@ -237,12 +237,12 @@ def process_order(order):
             try:
                 future.result()
             except Exception as e:
-                print(f"(Log for #{original_order_number}) Error in thread: {e}")
+                print(f"(Log for #{original_order_number}) Error in thread: {e}", flush=True)
 
 
 def search_and_print(original_order_number, searchable_order_number, lawn_plan_keyword, folder, total_plans, plan_index):
     folder_name = "'First'" if folder == config.folder_1 else "'Recurring'" if folder == config.folder_2 else "'Sent'"
-    print(f"(Log for #{original_order_number}) Searching for lawn plan for order #{original_order_number} with keyword \'{lawn_plan_keyword}\' in {folder_name} folder")
+    print(f"(Log for #{original_order_number}) Searching for lawn plan for order #{original_order_number} with keyword \'{lawn_plan_keyword}\' in {folder_name} folder", flush=True)
 
     try:
         found_results = search_folder(folder, folder_name, searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index)
@@ -269,26 +269,26 @@ def search_folder(folder, folder_name, searchable_order_number, original_order_n
                 dbx.files_download_to_file(local_file_path, file_path)
                 found_result.append((local_file_path, file_path))
                 file_found = True
-                print(f"(Log for #{original_order_number}) Order #{original_order_number} (Plan {plan_index} of {total_plans}): found {file_path} in {folder_name} folder")
+                print(f"(Log for #{original_order_number}) Order #{original_order_number} (Plan {plan_index} of {total_plans}): found {file_path} in {folder_name} folder", flush=True)
 
     if not file_found:
-        print(f"(Log for #{original_order_number}) No file found for order number {original_order_number} with lawn plan keyword \'{lawn_plan_keyword}\' in {folder_name}")
+        print(f"(Log for #{original_order_number}) No file found for order number {original_order_number} with lawn plan keyword \'{lawn_plan_keyword}\' in {folder_name}", flush=True)
 
         # Search in the Sent folder if the current folder is not the Sent folder
         if folder != config.sent_folder_path:
-            print(f"(Log for #{original_order_number}) Now searching for lawn plan with keyword \'{lawn_plan_keyword}\' for order #{original_order_number} in 'Sent' folder")
+            print(f"(Log for #{original_order_number}) Now searching for lawn plan with keyword \'{lawn_plan_keyword}\' for order #{original_order_number} in 'Sent' folder", flush=True)
             found_result = search_folder(config.sent_folder_path, 'Sent', searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index)
             # If the search in the Sent folder fails, print an error message
             if not found_result:
                 failed.append(original_order_number)
-                print(f"(Log for #{original_order_number}) (Log for #{original_order_number}) Error: No file found for order #{original_order_number} in 'Sent' folder; ending search")
+                print(f"(Log for #{original_order_number}) (Log for #{original_order_number}) Error: No file found for order #{original_order_number} in 'Sent' folder; ending search", flush=True)
         else:
             failed.append(original_order_number)
-            print(f"(Log for #{original_order_number}) Error: No file found for order #{original_order_number} in 'Sent' folder; ending search")
+            print(f"(Log for #{original_order_number}) Error: No file found for order #{original_order_number} in 'Sent' folder; ending search", flush=True)
     return found_result
 
 def print_file(file_path, printer_service_api_key, original_order_number):
-    print(f"(Log for #{original_order_number}) Printing file for order #{original_order_number}")
+    print(f"(Log for #{original_order_number}) Printing file for order #{original_order_number}", flush=True)
     headers = {
         'Content-Type': 'application/json',
         'Authorization': f'Basic {base64.b64encode(printer_service_api_key.encode()).decode()}'
@@ -309,12 +309,12 @@ def print_file(file_path, printer_service_api_key, original_order_number):
         'source': 'ShipStation Lawn Plan'
     }
 
-    print(f"(Log for #{original_order_number}) Sending print job: {print_job}")
+    print(f"(Log for #{original_order_number}) Sending print job: {print_job}", flush=True)
     response = session.post('https://api.printnode.com/printjobs', headers=headers, json=print_job)
 
     if response.status_code == 201:
-        print(f"(Log for #{original_order_number}) Print job submitted successfully for order #{original_order_number}")
+        print(f"(Log for #{original_order_number}) Print job submitted successfully for order #{original_order_number}", flush=True)
         file_move_queue.put((file_path, original_order_number))
     if response.status_code == 400:
         file_move_queue.put((file_path, original_order_number))
-        print(f"(Log for #{original_order_number}) Error submitting print job for order #{original_order_number}: {response.json()['message']}")
+        print(f"(Log for #{original_order_number}) Error submitting print job for order #{original_order_number}: {response.json()['message']}", flush=True)
