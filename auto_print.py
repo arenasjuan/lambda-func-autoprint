@@ -18,7 +18,8 @@ encoded_auth_string = base64.b64encode(auth_string.encode('utf-8')).decode('utf-
 
 headers = {
     "Content-Type": "application/json",
-    "Authorization": f"Basic {encoded_auth_string}"
+    "Authorization": f"Basic {encoded_auth_string}",
+    "X-Partner": config.x_partner
 }
 
 # Function to refresh Dropbox access token
