@@ -309,7 +309,6 @@ def print_file(file_path, printer_service_api_key, original_order_number):
         'source': 'ShipStation Lawn Plan'
     }
 
-    print(f"(Log for #{original_order_number}) Sending print job: {print_job}", flush=True)
     response = session.post('https://api.printnode.com/printjobs', headers=headers, json=print_job)
 
     if response.status_code == 201:
