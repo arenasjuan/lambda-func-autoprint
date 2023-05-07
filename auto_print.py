@@ -208,7 +208,7 @@ def process_order(order):
         if custom_field1 is not None:
             if "First" in custom_field1:
                 folder_to_search = config.folder_1
-            elif "Recurring" or 'Prepaid' in custom_field1:
+            elif "Recurring" or "Prepaid" in custom_field1:
                 folder_to_search = config.folder_2
 
             #Search through the order tags if the relevant keywords aren't in Custom Field 1
@@ -260,37 +260,6 @@ def search_and_print(original_order_number, searchable_order_number, lawn_plan_k
         failed.append(original_order_number)
         print(f"Error: {e}")
     return
-
-def search_folder(folder, folder_name, searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index):
-    found_result = []
-    search_results = dbx.files_search(folder, f"{searchable_order_number}")
-    file_found = False
-
-    if search_results.matches:
-        for match in search_results.matches:
-            filename = match.metadata.name
-            if lawn_plan_keyword in filename:
-                file_path = match.metadata.path_display
-                local_file_path = os.path.join('/tmp', filename)
-                dbx.files_download_to_file(local_file_path, file_path)
-                found_result.append((local_file_path, file_path))
-                file_found = True
-                print(f"(Log for #{original_order_number}) Order #{original_order_number} (Plan {plan_index} of {total_plans}): found {file_path} in {folder_name} folder", flush=True)
-
-    if not file_found:
-
-        # Search in the Sent folder if the current folder is not the Sent folder
-        if folder != config.sent_folder_path:
-            print(f"(Log for #{original_order_number}) No file found for order number {original_order_number} with lawn plan keyword \'{lawn_plan_keyword}\' in {folder_name}; now searching in 'Sent' folder", flush=True)
-            found_result = search_folder(config.sent_folder_path, 'Sent', searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index)
-            # If the search in the Sent folder fails, print an error message
-            if not found_result:
-                failed.append(original_order_number)
-                print(f"(Log for #{original_order_number}) Error, ending search: No file found for order #{original_order_number} in 'Sent' or {folder_name} folders", flush=True)
-        else:
-            failed.append(original_order_number)
-            print(f"(Log for #{original_order_number}) Error, ending search: No file found for order #{original_order_number} in 'Sent' folder", flush=True)
-    return found_result
 
 
 def search_folder(folder, folder_name, searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index, searched_folders=None):
