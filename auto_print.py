@@ -208,7 +208,7 @@ def process_order(order):
         if custom_field1 is not None:
             if "First" in custom_field1:
                 folder_to_search = config.folder_1
-            elif "Recurring" in custom_field1:
+            elif "Recurring" or 'Prepaid' in custom_field1:
                 folder_to_search = config.folder_2
 
             #Search through the order tags if the relevant keywords aren't in Custom Field 1
