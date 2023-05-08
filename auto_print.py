@@ -22,6 +22,10 @@ headers = {
     "X-Partner": config.x_partner
 }
 
+
+session = requests.Session()
+session.headers.update(headers)
+
 # Function to refresh Dropbox access token
 def refresh_dropbox_token(refresh_token, app_key, app_secret):
     token_url = "https://api.dropboxapi.com/oauth2/token"
@@ -84,13 +88,6 @@ def move_file_worker():
 
 
 def lambda_handler(event, context):
-    global session
-    session = requests.Session()
-    session.headers.update({
-        "Content-Type": "application/json",
-        "Authorization": f"Basic {encoded_auth_string}"
-    })
-
     payload = json.loads(event['Records'][0]['body'])
     resource_url = payload["resource_url"][:-5] + 'True'
     print(f"Payload resource_url: {resource_url}")

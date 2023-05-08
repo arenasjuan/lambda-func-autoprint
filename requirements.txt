@@ -2,5 +2,3 @@ requests
 dropbox
 pytz
 urllib3<2.0
-python-pptx
-reportlab
