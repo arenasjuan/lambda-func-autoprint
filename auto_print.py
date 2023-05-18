@@ -181,6 +181,8 @@ def get_order_by_number(order):
 def process_order(order):
     original_order_number = order["orderNumber"]
 
+    LA_print_job = False
+
     shipment_create_time_str = order['createDate']
     time_diff_minutes = calculate_time_difference(shipment_create_time_str, start_time)
 
@@ -191,6 +193,11 @@ def process_order(order):
     
     order_items = order['shipmentItems']
     searchable_order_number = original_order_number
+    order_with_tags = get_order_by_number(order)
+    tags = order_with_tags.get('tagIds', None)
+    if tags is not None and 65915 in tags:
+        LA_print_job = True
+
     if "-" in searchable_order_number:
         searchable_order_number = searchable_order_number.split("-")[0]
 
@@ -199,27 +206,19 @@ def process_order(order):
     if order['advancedOptions'].get('storeId') == 310067:
         folder_to_search = config.sent_folder_path
     else:
-        # Get the order with its custom field information
-        order_with_tags = get_order_by_number(order)
-        custom_field1 = order_with_tags['advancedOptions'].get('customField1', None)
-        if custom_field1 is not None:
-            if "First" in custom_field1:
+        if tags is not None and 62743 in tags:
+            folder_to_search = config.folder_1
+        elif tags is not None and 62744 in tags:
+            folder_to_search = config.folder_2
+        else:
+            custom_field2 = order_with_tags['advancedOptions'].get('customField2', None)
+            if custom_field2 is not None and custom_field2 == "F":
                 folder_to_search = config.folder_1
-            elif "Recurring" or "Prepaid" in custom_field1:
+            elif custom_field2 is not None and custom_field2 == "R":
                 folder_to_search = config.folder_2
-
-            #Search through the order tags if the relevant keywords aren't in Custom Field 1
             else:
-                tags = order.get('tagIds', None)
-                if tags is not None:
-                    if 62743 in tags:
-                        folder_to_search = config.folder_1
-                    elif 62744 in tags:
-                        folder_to_search = config.folder_2
-
-    if folder_to_search is None:
-        print(f"(Log for #{original_order_number}) Error: Order #{original_order_number} seems to have a lawn plan but is not a manual order and not labelled 'First' or 'Recurring'; checking 'Sent' folder", flush=True)
-        folder_to_search = config.sent_folder_path
+                print(f"(Log for #{original_order_number}) Error: Order #{original_order_number} seems to have a lawn plan but is not a manual order and not labelled 'First' or 'Recurring'; checking 'Sent' folder", flush=True)
+                folder_to_search = config.sent_folder_path
 
     lawn_plan_keywords = []
     lawn_plan_items = [item for item in order_items for plan_sku in config.lawn_plan_skus if plan_sku in item['sku']]
@@ -235,7 +234,7 @@ def process_order(order):
         print_counter_dict[original_order_number] = 0
 
     with ThreadPoolExecutor(max_workers=len(lawn_plan_keywords)) as executor:
-        futures = [executor.submit(search_and_print, original_order_number, searchable_order_number, lawn_plan_keyword, folder_to_search, len(lawn_plan_keywords), i + 1) for i, lawn_plan_keyword in enumerate(lawn_plan_keywords)]
+        futures = [executor.submit(search_and_print, original_order_number, searchable_order_number, lawn_plan_keyword, folder_to_search, len(lawn_plan_keywords), i + 1, LA_print_job) for i, lawn_plan_keyword in enumerate(lawn_plan_keywords)]
         for future in as_completed(futures):
             try:
                 future.result()
@@ -243,16 +242,18 @@ def process_order(order):
                 print(f"(Log for #{original_order_number}) Error in thread: {e}", flush=True)
 
 
-def search_and_print(original_order_number, searchable_order_number, lawn_plan_keyword, folder, total_plans, plan_index):
+def search_and_print(original_order_number, searchable_order_number, lawn_plan_keyword, folder, total_plans, plan_index, LA_print_job):
     folder_name = "'First'" if folder == config.folder_1 else "'Recurring'" if folder == config.folder_2 else "'Sent'"
     print(f"(Log for #{original_order_number}) Searching for lawn plan for order #{original_order_number} with keyword \'{lawn_plan_keyword}\' in {folder_name} folder", flush=True)
 
     try:
+        printer_api_key = config.J_PRINTER_API_KEY if LA_print_job else config.PRINTER_SERVICE_API_KEY
+        printer_id = config.LA_PRINTER_ID if LA_print_job else config.PRINTER_ID
         found_results = search_folder(folder, folder_name, searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index)
         for local_file_path, file_path in found_results:
             with print_counter_lock:
                 print_counter_dict[original_order_number] += 1
-            print_file(file_path, config.PRINTER_SERVICE_API_KEY, original_order_number)
+            print_file(file_path, printer_api_key, printer_id, original_order_number)
     except Exception as e:
         failed.append(original_order_number)
         print(f"Error: {e}")
@@ -297,7 +298,7 @@ def search_folder(folder, folder_name, searchable_order_number, original_order_n
     return found_result
 
 
-def print_file(file_path, printer_service_api_key, original_order_number):
+def print_file(file_path, printer_service_api_key, printer_id, original_order_number):
     print(f"(Log for #{original_order_number}) Printing file for order #{original_order_number}", flush=True)
     headers = {
         'Content-Type': 'application/json',
@@ -312,7 +313,7 @@ def print_file(file_path, printer_service_api_key, original_order_number):
         encoded_content = base64.b64encode(file_content).decode('utf-8')
 
     print_job = {
-        'printerId': config.DESKTOP_PRINTER_ID,
+        'printerId': printer_id,
         'title': f'Lawn Plan from batch {print_batch} started at time: {start_time}',
         'contentType': 'pdf_base64',
         'content': encoded_content,
