@@ -181,8 +181,6 @@ def get_order_by_number(order):
 def process_order(order):
     original_order_number = order["orderNumber"]
 
-    LA_print_job = False
-
     shipment_create_time_str = order['createDate']
     time_diff_minutes = calculate_time_difference(shipment_create_time_str, start_time)
 
@@ -193,10 +191,7 @@ def process_order(order):
     
     order_items = order['shipmentItems']
     searchable_order_number = original_order_number
-    order_with_tags = get_order_by_number(order)
-    tags = order_with_tags.get('tagIds', None)
-    if tags is not None and 65915 in tags:
-        LA_print_job = True
+
 
     if "-" in searchable_order_number:
         searchable_order_number = searchable_order_number.split("-")[0]
@@ -206,6 +201,8 @@ def process_order(order):
     if order['advancedOptions'].get('storeId') == 310067:
         folder_to_search = config.sent_folder_path
     else:
+        order_with_tags = get_order_by_number(order)
+        tags = order_with_tags.get('tagIds', None)
         if tags is not None and 62743 in tags:
             folder_to_search = config.folder_1
         elif tags is not None and 62744 in tags:
@@ -234,7 +231,7 @@ def process_order(order):
         print_counter_dict[original_order_number] = 0
 
     with ThreadPoolExecutor(max_workers=len(lawn_plan_keywords)) as executor:
-        futures = [executor.submit(search_and_print, original_order_number, searchable_order_number, lawn_plan_keyword, folder_to_search, len(lawn_plan_keywords), i + 1, LA_print_job) for i, lawn_plan_keyword in enumerate(lawn_plan_keywords)]
+        futures = [executor.submit(search_and_print, original_order_number, searchable_order_number, lawn_plan_keyword, folder_to_search, len(lawn_plan_keywords), i + 1) for i, lawn_plan_keyword in enumerate(lawn_plan_keywords)]
         for future in as_completed(futures):
             try:
                 future.result()
@@ -242,13 +239,13 @@ def process_order(order):
                 print(f"(Log for #{original_order_number}) Error in thread: {e}", flush=True)
 
 
-def search_and_print(original_order_number, searchable_order_number, lawn_plan_keyword, folder, total_plans, plan_index, LA_print_job):
+def search_and_print(original_order_number, searchable_order_number, lawn_plan_keyword, folder, total_plans, plan_index):
     folder_name = "'First'" if folder == config.folder_1 else "'Recurring'" if folder == config.folder_2 else "'Sent'"
     print(f"(Log for #{original_order_number}) Searching for lawn plan for order #{original_order_number} with keyword \'{lawn_plan_keyword}\' in {folder_name} folder", flush=True)
 
     try:
-        printer_api_key = config.J_PRINTER_API_KEY if LA_print_job else config.PRINTER_SERVICE_API_KEY
-        printer_id = config.LA_PRINTER_ID if LA_print_job else config.PRINTER_ID
+        printer_api_key = config.PRINTER_SERVICE_API_KEY
+        printer_id = config.PRINTER_ID
         found_results = search_folder(folder, folder_name, searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index)
         for local_file_path, file_path in found_results:
             with print_counter_lock:
