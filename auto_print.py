@@ -11,6 +11,7 @@ from queue import Queue
 from threading import Thread, Lock
 from dateutil import tz
 import re
+from io import BytesIO
 
 auth_string = f"{config.SHIPSTATION_API_KEY}:{config.SHIPSTATION_API_SECRET}"
 encoded_auth_string = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
@@ -95,26 +96,46 @@ def lambda_handler(event, context):
     data = response.json()
     print(data)
 
-    # Filter the shipments to only include those with lawn plans
-    shipments = [shipment for shipment in data['shipments'] if shipment['shipmentItems'] is not None and any(any(plan_sku in item['sku'] for plan_sku in config.lawn_plan_skus) for item in shipment['shipmentItems'])]
+    mlp_shipments = []
+    stk_shipments = []
 
-    print(f"Number of shipments with lawn plans: {len(shipments)}")
+    for shipment in data['shipments']:
+        if shipment['shipmentItems'] is not None:
+            has_lawn_plan = any(any(plan_sku in item['sku'] for plan_sku in config.lawn_plan_skus) for item in shipment['shipmentItems'])
+            has_stk = any('STK' in item['sku'] or 'LYL' in item['sku'] for item in shipment['shipmentItems'])
+
+            if has_lawn_plan:
+                mlp_shipments.append(shipment)
+            if has_stk:
+                stk_shipments.append(shipment)
+
+
+    print(f"Number of shipments with lawn plans: {len(mlp_shipments)}")
+
+    print(f"Number of shipments with STKs: {len(stk_shipments)}")    
 
     # Print the order numbers before sorting
-    print("Order numbers before sorting:", [shipment["orderNumber"] for shipment in shipments])
+    print("Order numbers before sorting:", [shipment["orderNumber"] for shipment in mlp_shipments])
 
     # Sort the filtered shipments by order number
-    sorted_shipments = sorted(shipments, key=lambda x: int(x['orderNumber'].split('-')[0]))
+    sorted_mlp_shipments = sorted(mlp_shipments, key=lambda x: int(x['orderNumber'].split('-')[0]))
+
+    sorted_stk_shipments = sorted(stk_shipments, key=lambda x: int(x['orderNumber'].split('-')[0]))
 
     # Print the order numbers after sorting
-    print("Order numbers after sorting:", [shipment["orderNumber"] for shipment in sorted_shipments])
+    print("Order numbers after sorting:", [shipment["orderNumber"] for shipment in sorted_mlp_shipments])
 
     worker_thread = Thread(target=move_file_worker)
     worker_thread.start()
 
-    # Process the orders sequentially
-    for shipment in sorted_shipments:
-        process_order(shipment)
+    with ThreadPoolExecutor() as executor:
+        # Process the orders sequentially in one thread
+        for shipment in sorted_mlp_shipments:
+            executor.submit(process_order, shipment)
+
+        # Process the items in sorted_stk_shipments concurrently in another thread
+        for shipment in sorted_stk_shipments:
+            executor.submit(print_barcode, shipment["orderNumber"])
 
     # Wait for the worker thread to finish moving all files
     file_move_queue.put(None)
@@ -178,6 +199,39 @@ def get_order_by_number(order):
         print(f"(Log for #{order['orderNumber']}) No orders found for order #{order['orderNumber']}", flush=True)
         return
 
+def print_barcode(order_number, printer_service_api_key=config.PRINTER_SERVICE_API_KEY):
+    if "-" in order_number:
+        order_number = order_number.split("-")[0]
+
+    start_position_x = 180
+    start_position_y = 80
+
+    zpl_code = f"^XA^FO{start_position_x},{start_position_y}^BY3^BCN,100,Y,N,N^FD{order_number}^XZ"
+
+    # Create print job
+    print_job = {
+        'printerId': config.BARCODE_ID,
+        'title': f'Barcode for Order #{order_number}',
+        'contentType': 'raw_base64',
+        'content': base64.b64encode(zpl_code.encode()).decode(),
+        'source': 'ShipStation Barcode'
+    }
+
+    # Print
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Basic {base64.b64encode(printer_service_api_key.encode()).decode()}'
+    }
+    response = session.post('https://api.printnode.com/printjobs', headers=headers, json=print_job)
+
+    # Log
+    if response.status_code == 201:
+        print(f"(Log for #{order_number}) Print job submitted successfully for order #{order_number}", flush=True)
+    elif response.status_code == 400:
+        print(f"(Log for #{order_number}) Error submitting print job for order #{order_number}: {response.json()['message']}", flush=True)
+
+
+
 def process_order(order):
     original_order_number = order["orderNumber"]
 
@@ -190,6 +244,8 @@ def process_order(order):
         return
     
     order_items = order['shipmentItems']
+
+
     searchable_order_number = original_order_number
 
 
@@ -311,7 +367,7 @@ def print_file(file_path, printer_service_api_key, printer_id, original_order_nu
 
     print_job = {
         'printerId': printer_id,
-        'title': f'Lawn Plan from batch {print_batch} started at time: {start_time}',
+        'title': f'Lawn Plan for Order #{original_order_number} started at time: {start_time}',
         'contentType': 'pdf_base64',
         'content': encoded_content,
         'source': 'ShipStation Lawn Plan'
