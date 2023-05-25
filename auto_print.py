@@ -271,8 +271,11 @@ def process_order(order):
     lawn_plan_items = [item for item in order_items for plan_sku in config.lawn_plan_skus if plan_sku in item['sku']]
     for item in lawn_plan_items:
         matching_key = get_matching_mlp_key(item['sku'])
-        lawn_plan_keyword = config.mlp_dict[matching_key]
-        lawn_plan_keywords.append(lawn_plan_keyword)
+        if matching_key is not None:
+            lawn_plan_keyword = config.mlp_dict[matching_key]
+            lawn_plan_keywords.append(lawn_plan_keyword)
+        else:
+            print(f"Log for #{original_order_number}: Error: Couldn't find matching key for item '{item['name']}'")
 
     print(f"(Log for #{original_order_number}) Preparing search for order #{original_order_number} with keyword(s) {lawn_plan_keywords}", flush=True)
 
