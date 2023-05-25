@@ -5,7 +5,6 @@ import base64
 import dropbox
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-import uuid
 import config
 from queue import Queue
 from threading import Thread, Lock
@@ -58,9 +57,6 @@ dbx_team = dropbox.DropboxTeam(DROPBOX_ACCESS_TOKEN)
 dbx = dbx_team.as_user(config.DROPBOX_TEAM_MEMBER_ID)
 dbx = dbx.with_path_root(dropbox.common.PathRoot.root(config.DROPBOX_NAMESPACE_ID))
 
-
-print_batch = str(uuid.uuid4())
-
 # Define the shared dictionary and lock
 print_counter_dict = {}
 print_counter_lock = Lock()
@@ -86,8 +82,6 @@ def move_file_worker():
         move_file_to_sent_folder(source_path, order_number)
         file_move_queue.task_done()
 
-
-
 def lambda_handler(event, context):
     payload = json.loads(event['Records'][0]['body'])
     resource_url = payload["resource_url"][:-5] + 'True'
@@ -109,9 +103,7 @@ def lambda_handler(event, context):
             if has_stk:
                 stk_shipments.append(shipment)
 
-
     print(f"Number of shipments with lawn plans: {len(mlp_shipments)}")
-
     print(f"Number of shipments with STKs: {len(stk_shipments)}")    
 
     # Print the order numbers before sorting
@@ -119,7 +111,6 @@ def lambda_handler(event, context):
 
     # Sort the filtered shipments by order number
     sorted_mlp_shipments = sorted(mlp_shipments, key=lambda x: int(x['orderNumber'].split('-')[0]))
-
     sorted_stk_shipments = sorted(stk_shipments, key=lambda x: int(x['orderNumber'].split('-')[0]))
 
     # Print the order numbers after sorting
@@ -128,14 +119,17 @@ def lambda_handler(event, context):
     worker_thread = Thread(target=move_file_worker)
     worker_thread.start()
 
-    with ThreadPoolExecutor() as executor:
-        # Process the orders sequentially in one thread
-        for shipment in sorted_mlp_shipments:
-            executor.submit(process_order, shipment)
+    # Process mlp_shipments in one thread
+    mlp_thread = Thread(target=lambda: [process_order(shipment) for shipment in sorted_mlp_shipments])
+    mlp_thread.start()
 
-        # Process the items in sorted_stk_shipments concurrently in another thread
-        for shipment in sorted_stk_shipments:
-            executor.submit(print_barcode, shipment["orderNumber"])
+    # Process stk_shipments in another thread
+    stk_thread = Thread(target=lambda: [print_barcode(shipment["orderNumber"]) for shipment in sorted_stk_shipments])
+    stk_thread.start()
+
+    # Wait for both threads to complete
+    mlp_thread.join()
+    stk_thread.join()
 
     # Wait for the worker thread to finish moving all files
     file_move_queue.put(None)
@@ -301,7 +295,7 @@ def search_and_print(original_order_number, searchable_order_number, lawn_plan_k
 
     try:
         printer_api_key = config.PRINTER_SERVICE_API_KEY
-        printer_id = config.PRINTER_ID
+        printer_id = config.COPY_PRINTER_ID
         found_results = search_folder(folder, folder_name, searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index)
         for local_file_path, file_path in found_results:
             with print_counter_lock:
