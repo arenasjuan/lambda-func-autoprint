@@ -11,6 +11,8 @@ from threading import Thread, Lock
 from dateutil import tz
 import re
 from io import BytesIO
+import shutil
+from PyPDF2 import PdfMerger, PdfFileReader
 
 auth_string = f"{config.SHIPSTATION_API_KEY}:{config.SHIPSTATION_API_SECRET}"
 encoded_auth_string = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
@@ -71,6 +73,10 @@ file_move_queue = Queue()
 
 failed = []
 
+barcode_list = []
+
+pdf_paths = []
+
 def move_file_worker():
     global failed
     while True:
@@ -90,21 +96,27 @@ def lambda_handler(event, context):
     data = response.json()
     print(data)
 
+    batch_number = data['shipments'][0].get('batchNumber')
+
+    if len(data['shipments']) == 1:
+        order_number = data['shipments'][0].get('orderNumber')
+
     mlp_shipments = []
     stk_shipments = []
-
     for shipment in data['shipments']:
         if shipment['shipmentItems'] is not None:
             has_lawn_plan = any(any(plan_sku in item['sku'] for plan_sku in config.lawn_plan_skus) for item in shipment['shipmentItems'])
             has_stk = any('STK' in item['sku'] or 'LYL' in item['sku'] for item in shipment['shipmentItems'])
-
             if has_lawn_plan:
                 mlp_shipments.append(shipment)
             if has_stk:
                 stk_shipments.append(shipment)
-
     print(f"Number of shipments with lawn plans: {len(mlp_shipments)}")
-    print(f"Number of shipments with STKs: {len(stk_shipments)}")    
+    print(f"Number of shipments with STKs: {len(stk_shipments)}")
+
+    if not mlp_shipments and not stk_shipments:
+        print("Nothing to print; ending execution")
+        return
 
     # Print the order numbers before sorting
     print("Order numbers before sorting:", [shipment["orderNumber"] for shipment in mlp_shipments])
@@ -123,6 +135,37 @@ def lambda_handler(event, context):
     mlp_thread = Thread(target=lambda: [process_order(shipment) for shipment in sorted_mlp_shipments])
     mlp_thread.start()
 
+    current_date_folder = f"{config.batch_record_path}/{start_time.strftime('%m.%d.%Y')}"
+    ensure_folder_exists(current_date_folder)
+
+    barcode_filename = None
+    barcode_destination = None
+    mlp_destination = None
+
+    # Determine the filename
+    if stk_shipments:
+        if batch_number:
+            batch_folder = f"{current_date_folder}/Batches/Batch #{batch_number}"
+            ensure_folder_exists(f"{current_date_folder}/Batches")
+            ensure_folder_exists(batch_folder)
+            barcode_filename = f"barcodes_batch{batch_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf"
+            barcode_destination = f"{batch_folder}/{barcode_filename}"
+        else:
+            order_folder = f"{current_date_folder}/Single Orders/Order #{order_number}"
+            ensure_folder_exists(f"{current_date_folder}/Single Orders")
+            ensure_folder_exists(order_folder)
+            barcode_filename = f"barcodes_order{order_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf"
+            barcode_destination = f"{order_folder}/{barcode_filename}"
+
+    # Determine the MLP PDF destination
+    if mlp_shipments:
+        if batch_number:
+            mlp_filename = f"mlp_batch{batch_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf"
+            mlp_destination = f"{current_date_folder}/Batches/Batch #{batch_number}/{mlp_filename}"
+        else:
+            mlp_filename = f"mlp_order{order_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf"
+            mlp_destination = f"{current_date_folder}/Single Orders/Order #{order_number}/{mlp_filename}"
+
     # Process stk_shipments in another thread
     stk_thread = Thread(target=lambda: [print_barcode(shipment["orderNumber"]) for shipment in sorted_stk_shipments])
     stk_thread.start()
@@ -131,11 +174,51 @@ def lambda_handler(event, context):
     mlp_thread.join()
     stk_thread.join()
 
+    if barcode_filename:
+        # Join the ZPL strings in barcode_list with newline characters
+        zpl_string = "".join(barcode_list)
+
+        # Convert ZPL string to PDF
+        url = 'http://api.labelary.com/v1/printers/12dpmm/labels/2.25x1/'
+        zpl_headers = {'Accept': 'application/pdf'}
+        response = requests.post(url, headers=zpl_headers, files={'file': zpl_string}, stream=True)
+
+        # Check response status
+        if response.status_code == 200:
+            temp_file_path = f"/tmp/{barcode_filename}"
+            response.raw.decode_content = True
+            with open(temp_file_path, 'wb') as f:
+                shutil.copyfileobj(response.raw, f)
+
+            # Upload the PDF file to Dropbox
+            with open(temp_file_path, 'rb') as f:
+                dbx.files_upload(f.read(), barcode_destination, mode=dropbox.files.WriteMode('overwrite'))
+
+    if pdf_paths:
+        merger = PdfMerger()
+        for pdf_path in pdf_paths:
+            merger.append(pdf_path)
+
+        output_filename = f"/tmp/plans_batch{batch_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf" if len(pdf_paths) > 1 else f"/tmp/plan_order{order_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf"
+        merger.write(output_filename)
+        merger.close()
+
+        with open(output_filename, 'rb') as f:
+            dbx.files_upload(f.read(), mlp_destination, mode=dropbox.files.WriteMode('overwrite'))
+
     # Wait for the worker thread to finish moving all files
     file_move_queue.put(None)
     worker_thread.join()
 
     print(f"Function failed for orders: {failed}")
+
+def ensure_folder_exists(path):
+    try:
+        dbx.files_get_metadata(path)
+    except dropbox.exceptions.ApiError as e:
+        if isinstance(e.error.get_path(), dropbox.files.LookupError):
+            dbx.files_create_folder(path)
+
 
 def calculate_time_difference(shipment_create_time_str, current_time):
     # Extract date and time components from the shipment_create_time_str
@@ -201,6 +284,7 @@ def print_barcode(order_number, printer_service_api_key=config.PRINTER_SERVICE_A
     start_position_y = 80
 
     zpl_code = f"^XA^FO{start_position_x},{start_position_y}^BY3^BCN,100,Y,N,N^FD{order_number}^XZ"
+    barcode_list.append(zpl_code)
 
     # Create print job
     print_job = {
@@ -298,12 +382,13 @@ def search_and_print(original_order_number, searchable_order_number, lawn_plan_k
 
     try:
         printer_api_key = config.PRINTER_SERVICE_API_KEY
-        printer_id = config.COPY_PRINTER_ID
+        printer_id = config.PRINTER_ID
         found_results = search_folder(folder, folder_name, searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index)
         for local_file_path, file_path in found_results:
             with print_counter_lock:
                 print_counter_dict[original_order_number] += 1
             print_file(file_path, printer_api_key, printer_id, original_order_number)
+            pdf_paths.append(local_file_path)
     except Exception as e:
         failed.append(original_order_number)
         print(f"Error: {e}")
