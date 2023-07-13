@@ -13,6 +13,7 @@ import re
 from io import BytesIO
 import shutil
 from PyPDF2 import PdfMerger, PdfFileReader
+from requests.auth import HTTPBasicAuth
 
 auth_string = f"{config.SHIPSTATION_API_KEY}:{config.SHIPSTATION_API_SECRET}"
 encoded_auth_string = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
@@ -43,7 +44,7 @@ def refresh_dropbox_token(refresh_token, app_key, app_secret):
         "client_secret": app_secret,
     }
 
-    response = requests.post(token_url, headers=headers, data=data)
+    response = session.post(token_url, data=data)
 
     if response.status_code == 200:
         return response.json()["access_token"]
@@ -98,9 +99,6 @@ def lambda_handler(event, context):
 
     batch_number = data['shipments'][0].get('batchNumber')
 
-    if len(data['shipments']) == 1:
-        order_number = data['shipments'][0].get('orderNumber')
-
     mlp_shipments = []
     stk_shipments = []
     for shipment in data['shipments']:
@@ -117,6 +115,13 @@ def lambda_handler(event, context):
     if not mlp_shipments and not stk_shipments:
         print("Nothing to print; ending execution")
         return
+
+    if len(mlp_shipments) == 1:
+        mlp_order_number = mlp_shipments[0].get('orderNumber')
+
+    if len(stk_shipments) == 1:
+        stk_order_number = stk_shipments[0].get('orderNumber')
+
 
     # Print the order numbers before sorting
     print("Order numbers before sorting:", [shipment["orderNumber"] for shipment in mlp_shipments])
@@ -151,20 +156,20 @@ def lambda_handler(event, context):
             barcode_filename = f"barcodes_batch{batch_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf"
             barcode_destination = f"{batch_folder}/{barcode_filename}"
         else:
-            order_folder = f"{current_date_folder}/Single Orders/Order #{order_number}"
+            order_folder = f"{current_date_folder}/Single Orders/Order #{stk_order_number}"
             ensure_folder_exists(f"{current_date_folder}/Single Orders")
             ensure_folder_exists(order_folder)
-            barcode_filename = f"barcodes_order{order_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf"
+            barcode_filename = f"barcode_order{stk_order_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf"
             barcode_destination = f"{order_folder}/{barcode_filename}"
 
     # Determine the MLP PDF destination
     if mlp_shipments:
         if batch_number:
-            mlp_filename = f"mlp_batch{batch_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf"
+            mlp_filename = f"plans_batch{batch_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf"
             mlp_destination = f"{current_date_folder}/Batches/Batch #{batch_number}/{mlp_filename}"
         else:
-            mlp_filename = f"mlp_order{order_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf"
-            mlp_destination = f"{current_date_folder}/Single Orders/Order #{order_number}/{mlp_filename}"
+            mlp_filename = f"plan_order{mlp_order_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf"
+            mlp_destination = f"{current_date_folder}/Single Orders/Order #{mlp_order_number}/{mlp_filename}"
 
     # Process stk_shipments in another thread
     stk_thread = Thread(target=lambda: [print_barcode(shipment["orderNumber"]) for shipment in sorted_stk_shipments])
@@ -181,7 +186,7 @@ def lambda_handler(event, context):
         # Convert ZPL string to PDF
         url = 'http://api.labelary.com/v1/printers/12dpmm/labels/2.25x1/'
         zpl_headers = {'Accept': 'application/pdf'}
-        response = requests.post(url, headers=zpl_headers, files={'file': zpl_string}, stream=True)
+        response = session.post(url, headers=zpl_headers, files={'file': zpl_string}, stream=True)
 
         # Check response status
         if response.status_code == 200:
@@ -199,7 +204,7 @@ def lambda_handler(event, context):
         for pdf_path in pdf_paths:
             merger.append(pdf_path)
 
-        output_filename = f"/tmp/plans_batch{batch_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf" if len(pdf_paths) > 1 else f"/tmp/plan_order{order_number}_{start_time.strftime('%m-%d-%Y_%H:%M')}.pdf"
+        output_filename = f"/tmp/{mlp_filename}"
         merger.write(output_filename)
         merger.close()
 
@@ -268,13 +273,19 @@ def move_file_to_sent_folder(source_path, order_number):
 def get_order_by_number(order):
     url = f"https://ssapi.shipstation.com/orders?orderNumber={order['orderNumber']}"
     response = session.get(url)
-    data = response.json()
-    if data["orders"]:
-        return next(o for o in data['orders'] if o['orderId'] == order['orderId'])
-    else:
-        failed_orders.append(order['orderNumber'])
-        print(f"(Log for #{order['orderNumber']}) No orders found for order #{order['orderNumber']}", flush=True)
-        return
+    try:
+        data = response.json()
+        if data["orders"]:
+            return next(o for o in data['orders'] if o['orderId'] == order['orderId'])
+        else:
+            failed_orders.append(order['orderNumber'])
+            print(f"(Log for #{order['orderNumber']}) No orders found for order #{order['orderNumber']}", flush=True)
+    except ValueError:  # includes simplejson.decoder.JSONDecodeError
+        print(f"Error decoding JSON from response for order #{order['orderNumber']}", flush=True)
+    except Exception as e:
+        print(f"An unexpected error occurred for order #{order['orderNumber']}: {str(e)}", flush=True)
+    return None
+
 
 def print_barcode(order_number, printer_service_api_key=config.PRINTER_SERVICE_API_KEY):
     if "-" in order_number:
@@ -336,20 +347,24 @@ def process_order(order):
         folder_to_search = config.sent_folder_path
     else:
         order_with_tags = get_order_by_number(order)
-        tags = order_with_tags.get('tagIds', None)
-        if tags is not None and 62743 in tags:
-            folder_to_search = config.folder_1
-        elif tags is not None and 62744 in tags:
-            folder_to_search = config.folder_2
+        if not order_with_tags:
+            print(f"(Log for #{original_order_number}) Error: Can't find order info for Order #{original_order_number}; checking 'Sent' folder by default", flush=True)
+            folder_to_search = config.sent_folder_path
         else:
-            custom_field2 = order_with_tags['advancedOptions'].get('customField2', None)
-            if custom_field2 is not None and custom_field2 == "F":
+            tags = order_with_tags.get('tagIds', None)
+            if tags is not None and 62743 in tags:
                 folder_to_search = config.folder_1
-            elif custom_field2 is not None and custom_field2 == "R":
+            elif tags is not None and 62744 in tags:
                 folder_to_search = config.folder_2
             else:
-                print(f"(Log for #{original_order_number}) Error: Order #{original_order_number} seems to have a lawn plan but is not a manual order and not labelled 'First' or 'Recurring'; checking 'Sent' folder", flush=True)
-                folder_to_search = config.sent_folder_path
+                custom_field2 = order_with_tags['advancedOptions'].get('customField2', None)
+                if custom_field2 is not None and custom_field2 == "F":
+                    folder_to_search = config.folder_1
+                elif custom_field2 is not None and custom_field2 == "R":
+                    folder_to_search = config.folder_2
+                else:
+                    print(f"(Log for #{original_order_number}) Error: Order #{original_order_number} seems to have a lawn plan but is not a manual order and not labelled 'First' or 'Recurring'; checking 'Sent' folder", flush=True)
+                    folder_to_search = config.sent_folder_path
 
     lawn_plan_keywords = []
     lawn_plan_items = [item for item in order_items for plan_sku in config.lawn_plan_skus if plan_sku in item['sku']]
