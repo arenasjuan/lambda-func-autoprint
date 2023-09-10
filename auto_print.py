@@ -3,6 +3,8 @@ import json
 import requests
 import base64
 import dropbox
+import re
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import config
@@ -44,7 +46,7 @@ def refresh_dropbox_token(refresh_token, app_key, app_secret):
         "client_secret": app_secret,
     }
 
-    response = session.post(token_url, data=data)
+    response = requests.post(token_url, data=data)
 
     if response.status_code == 200:
         return response.json()["access_token"]
@@ -78,6 +80,10 @@ barcode_list = []
 
 pdf_paths = []
 
+database_entries = []
+
+shipments_for_database = []
+
 def move_file_worker():
     global failed
     while True:
@@ -102,6 +108,12 @@ def lambda_handler(event, context):
     mlp_shipments = []
     stk_shipments = []
     for shipment in data['shipments']:
+
+        if not shipment_age_check(shipment):
+            print(f"(Log for #{shipment['orderNumber']}) Shipment too old, can't process batch; ending execution", flush=True)
+            return
+
+        shipments_for_database.append(shipment)
         if shipment['shipmentItems'] is not None:
             has_lawn_plan = any(any(plan_sku in item['sku'] for plan_sku in config.lawn_plan_skus) for item in shipment['shipmentItems'])
             has_stk = any('STK' in item['sku'] or 'LYL' in item['sku'] for item in shipment['shipmentItems'])
@@ -109,12 +121,9 @@ def lambda_handler(event, context):
                 mlp_shipments.append(shipment)
             if has_stk:
                 stk_shipments.append(shipment)
+    print(f"Number of shipments: {len(data['shipments'])}")
     print(f"Number of shipments with lawn plans: {len(mlp_shipments)}")
     print(f"Number of shipments with STKs: {len(stk_shipments)}")
-
-    if not mlp_shipments and not stk_shipments:
-        print("Nothing to print; ending execution")
-        return
 
     if len(mlp_shipments) == 1:
         mlp_order_number = mlp_shipments[0].get('orderNumber')
@@ -124,14 +133,16 @@ def lambda_handler(event, context):
 
 
     # Print the order numbers before sorting
-    print("Order numbers before sorting:", [shipment["orderNumber"] for shipment in mlp_shipments])
+    print("MLP order numbers before sorting:", [shipment["orderNumber"] for shipment in mlp_shipments])
+    print("STK order numbers before sorting:", [shipment["orderNumber"] for shipment in stk_shipments])
 
     # Sort the filtered shipments by order number
     sorted_mlp_shipments = sorted(mlp_shipments, key=lambda x: int(x['orderNumber'].split('-')[0]))
     sorted_stk_shipments = sorted(stk_shipments, key=lambda x: int(x['orderNumber'].split('-')[0]))
 
     # Print the order numbers after sorting
-    print("Order numbers after sorting:", [shipment["orderNumber"] for shipment in sorted_mlp_shipments])
+    print("MLP order numbers after sorting:", [shipment["orderNumber"] for shipment in sorted_mlp_shipments])
+    print("STK order numbers after sorting:", [shipment["orderNumber"] for shipment in sorted_stk_shipments])
 
     worker_thread = Thread(target=move_file_worker)
     worker_thread.start()
@@ -215,14 +226,19 @@ def lambda_handler(event, context):
     file_move_queue.put(None)
     worker_thread.join()
 
-    print(f"Function failed for orders: {failed}")
+    # create a ThreadPoolExecutor
+    with ThreadPoolExecutor() as executor:
+        # use executor.map to apply the function to all shipments in parallel
+        executor.map(prepare_database_entry, shipments_for_database)
 
-def ensure_folder_exists(path):
-    try:
-        dbx.files_get_metadata(path)
-    except dropbox.exceptions.ApiError as e:
-        if isinstance(e.error.get_path(), dropbox.files.LookupError):
-            dbx.files_create_folder(path)
+    url = "https://c3qu31k2tf.execute-api.us-west-1.amazonaws.com/Prod/webhook"
+    headers = {'Content-Type': 'application/json'}
+
+    # Send database_entries to the API
+    requests.post(url, headers=headers, data=json.dumps({"database_entries": database_entries}))
+
+    print("Shipment info sent to tracking notifier")
+    print(f"Function failed for orders: {failed}")
 
 
 def calculate_time_difference(shipment_create_time_str, current_time):
@@ -236,6 +252,77 @@ def calculate_time_difference(shipment_create_time_str, current_time):
     time_diff_minutes = time_diff.total_seconds() // 60
 
     return time_diff_minutes
+
+def shipment_age_check(order):
+    shipment_create_time_str = order['createDate']
+    time_diff_minutes = calculate_time_difference(shipment_create_time_str, start_time)
+
+    return False if time_diff_minutes > 15 else True
+
+
+def prepare_database_entry(order):
+    # Define carrier name
+    carrier_name = None
+    if order['carrierCode'].startswith('ups'):
+        carrier_name = 'UPS'
+    elif order['carrierCode'] == 'fedex':
+        carrier_name = 'FedEx'
+    else:
+        carrier_name = "USPS"
+
+    # Define shipped date
+    shipped_date = datetime.now().strftime("%Y%m%d")
+
+    # Build row data
+    row_data = {
+        "OrderNumber": order['orderNumber'],
+        "CustomerName": order['shipTo']['name'],
+        "CustomerEmail": order['customerEmail'],
+        "TrackingNumber": order['trackingNumber'],
+        "CarrierName": carrier_name,
+        "ShippedDate": shipped_date,
+        "StatusCode": None,
+        "LastLocation": 'Culver City',
+        "DaysAtLastLocation": 0,
+        "NotificationSent": 'No',
+        "Delayed": 'No',
+        "Delivered": 'No'
+    }
+
+    # Define a dictionary to store product counts
+    product_counts = config.products.copy()
+
+    for item in order['shipmentItems']:
+        # Check if the item is a lawn plan
+        if any(plan_sku in item['sku'] for plan_sku in config.lawn_plan_skus):
+            # Process lawn plan items
+            matches = re.findall(r'• (\d+) ([^\n]+)', item['name'])
+            for match in matches:
+                quantity, product_name = int(match[0]), match[1].strip()
+                if product_name in config.plan_products:
+                    product_counts[config.plan_products[product_name]] += quantity
+        elif item['sku'] in config.skus:
+            sku_entry = config.skus[item['sku']]
+            if isinstance(sku_entry, dict):
+                for product, quantity in sku_entry.items():
+                    product_counts[product] += quantity * item['quantity']
+            else:
+                product_counts[sku_entry] += item['quantity']
+
+    # Append product counts to row_data
+    row_data.update(product_counts)
+
+    # Append row_data to the global database_entries list
+    database_entries.append(row_data)
+
+
+def ensure_folder_exists(path):
+    try:
+        dbx.files_get_metadata(path)
+    except dropbox.exceptions.ApiError as e:
+        if isinstance(e.error.get_path(), dropbox.files.LookupError):
+            dbx.files_create_folder(path)
+
 
 
 def get_matching_mlp_key(sku):
@@ -324,19 +411,9 @@ def print_barcode(order_number, printer_service_api_key=config.PRINTER_SERVICE_A
 def process_order(order):
     original_order_number = order["orderNumber"]
 
-    shipment_create_time_str = order['createDate']
-    time_diff_minutes = calculate_time_difference(shipment_create_time_str, start_time)
-
-    # Ignore shipments that are older than Autoprint's timeout value
-    if time_diff_minutes > 15:
-        print(f"(Log for #{original_order_number}) Shipment too old, can't process", flush=True)
-        return
-    
     order_items = order['shipmentItems']
 
-
     searchable_order_number = original_order_number
-
 
     if "-" in searchable_order_number:
         searchable_order_number = searchable_order_number.split("-")[0]
@@ -369,12 +446,15 @@ def process_order(order):
     lawn_plan_keywords = []
     lawn_plan_items = [item for item in order_items for plan_sku in config.lawn_plan_skus if plan_sku in item['sku']]
     for item in lawn_plan_items:
-        matching_key = get_matching_mlp_key(item['sku'])
-        if matching_key is not None:
-            lawn_plan_keyword = config.mlp_dict[matching_key]
-            lawn_plan_keywords.append(lawn_plan_keyword)
+        if 'Hero' in item['name']:
+            lawn_plan_keywords.append('Hero')
         else:
-            print(f"Log for #{original_order_number}: Error: Couldn't find matching key for item '{item['name']}'")
+            matching_key = get_matching_mlp_key(item['sku'])
+            if matching_key is not None:
+                lawn_plan_keyword = config.mlp_dict[matching_key]
+                lawn_plan_keywords.append(lawn_plan_keyword)
+            else:
+                print(f"Log for #{original_order_number}: Error: Couldn't find matching key for item '{item['name']}'")
 
     print(f"(Log for #{original_order_number}) Preparing search for order #{original_order_number} with keyword(s) {lawn_plan_keywords}", flush=True)
 
@@ -418,7 +498,7 @@ def search_folder(folder, folder_name, searchable_order_number, original_order_n
     search_results = dbx.files_search(folder, f"{searchable_order_number}")
     file_found = False
 
-    searched_folders.append(folder_name)
+    searched_folders.append(f"'{folder_name}'")
 
     if search_results.matches:
         for match in search_results.matches:
@@ -429,23 +509,30 @@ def search_folder(folder, folder_name, searchable_order_number, original_order_n
                 dbx.files_download_to_file(local_file_path, file_path)
                 found_result.append((local_file_path, file_path))
                 file_found = True
-                print(f"(Log for #{original_order_number}) Order #{original_order_number} (Plan {plan_index} of {total_plans}): found {file_path} in {folder_name} folder", flush=True)
+                print(f"(Log for #{original_order_number}) Order #{original_order_number} (Plan {plan_index} of {total_plans}): found {file_path} in '{folder_name}' folder", flush=True)
 
     if not file_found:
-        # Search in the Sent folder if the current folder is not the Sent folder
-        if folder != config.sent_folder_path:
-            print(f"(Log for #{original_order_number}) No file found for order number {original_order_number} with lawn plan keyword \'{lawn_plan_keyword}\' in {folder_name}; now searching in 'Sent' folder", flush=True)
+        # Search in the Sent folder if it hasn't been searched yet
+        if "'Sent'" not in searched_folders:
+            print(f"(Log for #{original_order_number}) No file found for order number {original_order_number} with lawn plan keyword \'{lawn_plan_keyword}\' in '{folder_name}'; now searching in 'Sent' folder", flush=True)
             found_result = search_folder(config.sent_folder_path, 'Sent', searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index, searched_folders=searched_folders)
-
+        # If 'Sent' has been searched, but 'First' hasn't, search in 'First' folder
+        elif "'First'" not in searched_folders:
+            print(f"(Log for #{original_order_number}) No file found for order number {original_order_number} with lawn plan keyword \'{lawn_plan_keyword}\' in '{folder_name}'; now searching in 'First' folder", flush=True)
+            found_result = search_folder(config.folder_1, 'First', searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index, searched_folders=searched_folders)
+        # If both 'Sent' and 'First' have been searched but 'Recurring' hasn't, search in 'Recurring' folder
+        elif "'Recurring'" not in searched_folders:
+            print(f"(Log for #{original_order_number}) No file found for order number {original_order_number} with lawn plan keyword \'{lawn_plan_keyword}\' in '{folder_name}'; now searching in 'Recurring' folder", flush=True)
+            found_result = search_folder(config.folder_2, 'Recurring', searchable_order_number, original_order_number, lawn_plan_keyword, total_plans, plan_index, searched_folders=searched_folders)
+        # If all folders have been searched and no result is found, log an error message
         if not found_result:
             failed.append(original_order_number)
-            if len(searched_folders) > 1:
-                searched_folders_str = ' or '.join(searched_folders)
-                print(f"(Log for #{original_order_number}) Error, ending search: No file found for order #{original_order_number} in {searched_folders_str} folders", flush=True)
-            else:
-                print(f"(Log for #{original_order_number}) Error, ending search: No file found for order #{original_order_number} in 'Sent' folder, and no indication file is in the 'First' or 'Recurring' folders", flush=True)
+            searched_folders_str = ', '.join(searched_folders)
+            print(f"(Log for #{original_order_number}) Error, ending search: No file found for order #{original_order_number} in {searched_folders_str} folders", flush=True)
 
     return found_result
+
+
 
 
 def print_file(file_path, printer_service_api_key, printer_id, original_order_number):
